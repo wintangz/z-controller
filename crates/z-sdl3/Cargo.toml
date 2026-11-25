@@ -1,0 +1,13 @@
+[package]
+name = "z-sdl3"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }

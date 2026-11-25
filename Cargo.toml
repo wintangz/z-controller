@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/z-core",
+    "crates/z-sdl3",
+    "crates/z-platform-windows",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
