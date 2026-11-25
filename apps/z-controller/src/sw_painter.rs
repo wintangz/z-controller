@@ -305,14 +305,14 @@ fn sample_bilinear(tex: &CpuTexture, u: f32, v: f32) -> [u8; 4] {
     if tex.width == 0 || tex.height == 0 {
         return [255, 255, 255, 255];
     }
-    let fx = u * tex.width as f32 - 0.5;
-    let fy = v * tex.height as f32 - 0.5;
-    let x0 = (fx.floor() as isize).clamp(0, tex.width as isize - 1) as usize;
-    let y0 = (fy.floor() as isize).clamp(0, tex.height as isize - 1) as usize;
+    let fx = (u * tex.width as f32 - 0.5).clamp(0.0, (tex.width - 1) as f32);
+    let fy = (v * tex.height as f32 - 0.5).clamp(0.0, (tex.height - 1) as f32);
+    let x0 = fx.floor() as usize;
+    let y0 = fy.floor() as usize;
     let x1 = (x0 + 1).min(tex.width - 1);
     let y1 = (y0 + 1).min(tex.height - 1);
-    let tx = fx.fract().clamp(0.0, 1.0);
-    let ty = fy.fract().clamp(0.0, 1.0);
+    let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+    let ty = (fy - y0 as f32).clamp(0.0, 1.0);
 
     let p00 = tex.pixels[y0 * tex.width + x0];
     let p10 = tex.pixels[y0 * tex.width + x1];
@@ -334,4 +334,64 @@ fn sample_bilinear(tex: &CpuTexture, u: f32, v: f32) -> [u8; 4] {
         (p00[3] as f32 * w00 + p10[3] as f32 * w10 + p01[3] as f32 * w01 + p11[3] as f32 * w11 + 0.5)
             as u8,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Pos2, RawInput, Rect, Vec2, ViewportId};
+    use std::ptr::null_mut;
+
+    fn render_sample_text(ppp: f32, width: usize, height: usize) -> (f32, Vec<u32>) {
+        let ctx = egui::Context::default();
+        let mut raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                Pos2::ZERO,
+                Vec2::new(width as f32 / ppp, height as f32 / ppp),
+            )),
+            ..Default::default()
+        };
+        raw.viewports
+            .entry(ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(ppp);
+
+        let full_out = ctx.run(raw, |c| {
+            egui::CentralPanel::default().show(c, |ui| {
+                ui.heading("Controllers 150% DPI");
+                ui.label("Crisp native glyph rasterization");
+            });
+        });
+
+        let mut painter = SoftwarePainter::new();
+        painter.apply_textures(&full_out.textures_delta);
+        let clipped = ctx.tessellate(full_out.shapes, full_out.pixels_per_point);
+        painter.paint_and_blit(
+            null_mut(),
+            width,
+            height,
+            full_out.pixels_per_point,
+            &clipped,
+            0x000A_0A10,
+        );
+        (full_out.pixels_per_point, painter.framebuffer.clone())
+    }
+
+    #[test]
+    fn high_dpi_scaling_renders_larger_font_atlas_and_crisp_150pct_buffer() {
+        let (ppp100, fb100) = render_sample_text(1.0, 396, 601);
+        let (ppp150, fb150) = render_sample_text(1.5, 594, 902);
+
+        assert!((ppp100 - 1.0).abs() < 1e-4);
+        assert!((ppp150 - 1.5).abs() < 1e-4);
+        assert_eq!(fb100.len(), 396 * 601);
+        assert_eq!(fb150.len(), 594 * 902);
+
+        let lit_100 = fb100.iter().filter(|&&px| px != 0x000A_0A10 && px != 0x001B_1B1B).count();
+        let lit_150 = fb150.iter().filter(|&&px| px != 0x000A_0A10 && px != 0x001B_1B1B).count();
+        assert!(
+            lit_150 * 10 > lit_100 * 17,
+            "expected 150% DPI rendered pixel area ({lit_150}) to scale cleanly over 100% ({lit_100})"
+        );
+    }
 }

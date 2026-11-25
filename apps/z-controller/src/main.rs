@@ -48,6 +48,7 @@ fn main() {
     let mut tray_smoke_ms: Option<u64> = None;
     let mut show_editor_profile: Option<String> = None;
     let mut probe_profile_switch_json: Option<PathBuf> = None;
+    let mut test_dpi: Option<u32> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -81,6 +82,12 @@ fn main() {
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
                     tray_smoke_ms = Some(args[i + 1].parse().unwrap_or(4000));
+                    i += 1;
+                }
+            }
+            "--test-dpi" => {
+                if i + 1 < args.len() {
+                    test_dpi = args[i + 1].parse().ok();
                     i += 1;
                 }
             }
@@ -232,6 +239,7 @@ fn main() {
         show_editor_profile,
         preview,
         tray_smoke_ms,
+        test_dpi,
     ) {
         eprintln!("z-controller tray error: {err}");
         std::process::exit(1);

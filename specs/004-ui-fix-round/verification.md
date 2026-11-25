@@ -28,3 +28,11 @@
 - [screenshot-editor-xbox.png](file:///y:/Repos/z-controller/specs/004-ui-fix-round/screenshot-editor-xbox.png)
 - [screenshot-editor-sony.png](file:///y:/Repos/z-controller/specs/004-ui-fix-round/screenshot-editor-sony.png)
 - [screenshot-editor-nintendo.png](file:///y:/Repos/z-controller/specs/004-ui-fix-round/screenshot-editor-nintendo.png)
+- [screenshot-compact-150dpi.png](file:///y:/Repos/z-controller/specs/004-ui-fix-round/screenshot-compact-150dpi.png)
+- [screenshot-editor-xbox-150dpi.png](file:///y:/Repos/z-controller/specs/004-ui-fix-round/screenshot-editor-xbox-150dpi.png)
+
+## Add-on: DPI Awareness (`PerMonitorV2`)
+- **Embedded manifest**: `apps/z-controller/z-controller.manifest` embedded via `apps/z-controller/build.rs` (`/MANIFEST:EMBED`, `/MANIFESTINPUT:...`); verified in `target\release\z-controller.exe` `RT_MANIFEST #1` (`dpiAware=true/PM`, `dpiAwareness=PerMonitorV2`).
+- **Live monitor & `WM_DPICHANGED`**: On the host's 125% display (`winDpi=120`), `z-controller.exe --show` opened with `awareness=2` (`DPI_AWARENESS_PER_MONITOR_AWARE`) at native `513x798` physical pixels; triggering `WM_DPICHANGED` to 150% (`144 DPI`) cleanly resized & re-rendered `616x958` (`screenshot-compact-150dpi.png`) and `1558x1018` (`screenshot-editor-xbox-150dpi.png`) with crisp `Segoe UI` glyphs and diagram strokes.
+- **Re-checked tests & release build**: `cargo test --workspace` **22 passed, 0 failed** (incl. `dpi_scaling_math_and_outer_window_size_scale_monotonically` and `high_dpi_scaling_renders_larger_font_atlas_and_crisp_150pct_buffer`), **0 warnings**.
+- **Re-checked isolated tray budgets**: `WorkingSet64 = 16.82 MB` (`<= 25.0 MB`), `PrivateMemorySize64 = 3.82 MB`, 5-second idle CPU delta = `0.0312 s` (`0.039%` total CPU). Post-exit `probe_game_view.exe`: `[XInput] connected_slots=0`.
