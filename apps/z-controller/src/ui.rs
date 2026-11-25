@@ -57,6 +57,7 @@ pub struct AppUiState {
     pub selected_diagram_button: Option<LogicalButton>,
     pub last_dynamic_rect_main: Option<Rect>,
     pub last_dynamic_rect_editor: Option<Rect>,
+    pub desired_compact_logical_h: Option<f32>,
 }
 
 impl Default for AppUiState {
@@ -69,6 +70,7 @@ impl Default for AppUiState {
             selected_diagram_button: Some(LogicalButton::South),
             last_dynamic_rect_main: None,
             last_dynamic_rect_editor: None,
+            desired_compact_logical_h: None,
         }
     }
 }
@@ -462,7 +464,7 @@ pub fn draw_compact_main_snapshot(
         .frame(
             egui::Frame::none()
                 .fill(BG_NEAR_BLACK)
-                .inner_margin(Margin::same(SPACE_MD)),
+                .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
@@ -479,11 +481,11 @@ pub fn draw_compact_main_snapshot(
             draw_aligned_divider(ui, bounds.left(), bounds.right());
 
             if snap.controllers.is_empty() {
-                egui::Frame::none()
+                let empty_resp = egui::Frame::none()
                     .fill(PANEL_SURFACE)
                     .rounding(CARD_ROUNDING)
                     .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
-                    .inner_margin(Margin::same(SPACE_MD))
+                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.label(
@@ -496,20 +498,25 @@ pub fn draw_compact_main_snapshot(
                                 .color(TEXT_MUTED),
                         );
                     });
+                state.desired_compact_logical_h =
+                    Some((empty_resp.response.rect.bottom() + SPACE_SM + 36.0).ceil());
                 return;
             }
 
+            let mut content_bottom_y: Option<f32> = None;
             egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
+                .auto_shrink([false, true])
                 .show(ui, |ui| {
                     // Inner 6px inset keeps active cards' 4px static outer glow unclipped while locking single-column vertical flow.
-                    egui::Frame::none()
+                    let stack_resp = egui::Frame::none()
                         .inner_margin(Margin::symmetric(SPACE_XS + 2.0, SPACE_XS + 2.0))
                         .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
                             let avail_col = ui.available_width();
                             ui.set_max_width(avail_col);
                             let card_inner_w = (avail_col - SPACE_MD * 2.0).max(200.0);
-                            for ctrl in &snap.controllers {
+                            let total_cards = snap.controllers.len();
+                            for (idx, ctrl) in snap.controllers.iter().enumerate() {
                                 let is_selected =
                                     state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
                                 let card_fill = if is_selected {
@@ -529,11 +536,11 @@ pub fn draw_compact_main_snapshot(
                                 let card_resp = egui::Frame::none()
                                     .fill(card_fill)
                                     .rounding(CARD_ROUNDING)
-                                    .inner_margin(Margin::same(SPACE_MD))
+                                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM))
                                     .stroke(card_stroke)
                                     .show(ui, |ui| {
                                         ui.set_width(card_inner_w);
-                                        ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
+                                        ui.spacing_mut().item_spacing.y = SPACE_XS;
 
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = SPACE_SM;
@@ -712,10 +719,16 @@ pub fn draw_compact_main_snapshot(
                                 );
                             }
 
-                            ui.add_space(SPACE_MD);
+                            if idx + 1 < total_cards {
+                                ui.add_space(SPACE_SM);
+                            }
                         }
                     });
+                    content_bottom_y = Some(stack_resp.response.rect.bottom());
             });
+            if let Some(cb) = content_bottom_y {
+                state.desired_compact_logical_h = Some((cb + SPACE_SM + 36.0).ceil());
+            }
         });
 
     actions
@@ -1337,7 +1350,6 @@ fn draw_card_live_status(
     phys: &PhysicalSnapshot,
     card_inner_w: f32,
 ) {
-    ui.add_space(SPACE_XS);
     let div_left = ui.cursor().left();
     draw_aligned_divider(ui, div_left, div_left + card_inner_w);
 
@@ -1369,7 +1381,6 @@ fn draw_card_live_status(
         });
     });
 
-    ui.add_space(SPACE_XS);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
         for btn in CARD_STANDARD_ROW1 {
@@ -1386,10 +1397,10 @@ fn draw_card_live_status(
     });
 
     let extras = extra_buttons_for_device(family, present_mask | phys.buttons_mask);
-    if !extras.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::splat(SPACE_XS);
-            for btn in extras {
+    for chunk in extras.chunks(8) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_XS;
+            for &btn in chunk {
                 let pressed = (phys.buttons_mask & btn.bit()) != 0;
                 draw_mini_button_pill(ui, btn.family_chip(family), pressed, 36.0);
             }
@@ -1843,9 +1854,10 @@ mod tests {
             "expected SetDeviceShowLiveInput {{ show_live_input: false }}, got {emitted:?}"
         );
 
-        // Render collapsed state: live section omitted, last_dynamic_rect_main is None
+        // Render collapsed state: live section omitted, last_dynamic_rect_main is None,
+        // and desired_compact_logical_h shrinks cleanly to hug the single collapsed card.
         snap.controllers[0].show_live_input = false;
-        let _ = ctx.run(
+        let out_col = ctx.run(
             egui::RawInput {
                 screen_rect: screen,
                 time: Some(0.25),
@@ -1856,6 +1868,32 @@ mod tests {
             },
         );
         assert!(ui_state.last_dynamic_rect_main.is_none());
+        let collapsed_h = ui_state
+            .desired_compact_logical_h
+            .expect("desired_compact_logical_h populated on collapsed render");
+
+        // Compare against single expanded card height (must hug visible content in both states).
+        snap.controllers[0].show_live_input = true;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(0.30),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+        let expanded_h = ui_state
+            .desired_compact_logical_h
+            .expect("desired_compact_logical_h populated on expanded render");
+        assert!(
+            collapsed_h < 250.0 && (expanded_h - collapsed_h) > 100.0,
+            "collapsed height ({collapsed_h}) should hug header-only card and shrink >100px vs expanded ({expanded_h})"
+        );
+        let edit_pt = find_text_center(&out_col.shapes, "Edit Profile").unwrap();
+        // Bottom margin of collapsed card sits tightly below Edit Profile button (no reserved dead space)
+        assert!(collapsed_h - (edit_pt.y + 12.0) < 68.0);
     }
 
     #[test]

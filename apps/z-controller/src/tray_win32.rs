@@ -55,7 +55,8 @@ const CLEAR_BG_RGB: u32 = 0x000A_0A10;
 // Logical client dimensions at 96 DPI (exact same UI geometry at 100%, scaled cleanly per monitor DPI).
 const COMPACT_CLIENT_LOGICAL_W: i32 = 396;
 const COMPACT_CLIENT_LOGICAL_H: i32 = 601;
-const COMPACT_CLIENT_MIN_LOGICAL_H: i32 = 340;
+const COMPACT_CLIENT_MIN_LOGICAL_H: i32 = 150;
+const COMPACT_CLIENT_MAX_AUTO_LOGICAL_H: i32 = 760;
 const EDITOR_CLIENT_LOGICAL_W: i32 = 1024;
 const EDITOR_CLIENT_LOGICAL_H: i32 = 641;
 // Main compact window locks horizontal width (no Maximize, vertical resize only).
@@ -82,6 +83,17 @@ fn main_fixed_outer_width(dpi: u32) -> i32 {
         dpi,
     )
     .0
+}
+
+fn max_auto_logical_height(dpi: u32) -> i32 {
+    let screen_phys_h = unsafe { GetSystemMetrics(1 /* SM_CYSCREEN */) };
+    if screen_phys_h > 200 {
+        let ppp = dpi_to_ppp(dpi);
+        let work_logical = ((screen_phys_h - 90) as f32 / ppp).floor() as i32;
+        work_logical.clamp(240, COMPACT_CLIENT_MAX_AUTO_LOGICAL_H)
+    } else {
+        COMPACT_CLIENT_MAX_AUTO_LOGICAL_H
+    }
 }
 
 static REGISTER_EDITOR_CLASS: Once = Once::new();
@@ -259,6 +271,7 @@ struct WindowHostState {
     pending_state_refresh: bool,
     needs_redraw: bool,
     dirty_only_rect: Option<RECT>,
+    last_auto_logical_h: Option<i32>,
 }
 
 fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
@@ -353,6 +366,7 @@ pub fn run_tray_app(
         pending_state_refresh: false,
         needs_redraw: true,
         dirty_only_rect: None,
+        last_auto_logical_h: None,
     });
     let main_state_ptr = Box::into_raw(main_state);
 
@@ -577,6 +591,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             pending_state_refresh: false,
             needs_redraw: true,
             dirty_only_rect: None,
+            last_auto_logical_h: None,
         });
         let ed_ptr = Box::into_raw(ed_state);
         let created = unsafe {
@@ -884,6 +899,7 @@ unsafe extern "system" fn wnd_proc(
                 st.height = (crc.bottom - crc.top).max(0) as usize;
                 st.needs_redraw = true;
                 st.dirty_only_rect = None;
+                st.last_auto_logical_h = None;
             }
             unsafe { InvalidateRect(hwnd, null(), 0) };
             0
@@ -954,6 +970,7 @@ unsafe extern "system" fn wnd_proc(
             let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
             let mut actions: Vec<UiAction> = Vec::new();
             let mut request_followup = false;
+            let mut auto_resize_main_h: Option<i32> = None;
 
             if st.visible && st.width > 0 && st.height > 0 {
                 let backbuffer_ready = st
@@ -1040,6 +1057,15 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
                 let static_key = static_ui_hash(&snap_for_hash, &ui_state);
+                if role == WindowRole::Main && !st.in_size_move {
+                    if let Some(raw_h) = ui_state.desired_compact_logical_h {
+                        let clamped_h = (raw_h.ceil() as i32)
+                            .clamp(COMPACT_CLIENT_MIN_LOGICAL_H, max_auto_logical_height(st.dpi));
+                        if st.last_auto_logical_h != Some(clamped_h) {
+                            auto_resize_main_h = Some(clamped_h);
+                        }
+                    }
+                }
                 drop(ui_state);
                 drop(eng);
 
@@ -1090,6 +1116,35 @@ unsafe extern "system" fn wnd_proc(
                 st.needs_redraw = false;
             }
             unsafe { EndPaint(hwnd, &ps) };
+
+            if let Some(target_h) = auto_resize_main_h {
+                let dpi = {
+                    let st = unsafe { &mut *state_ptr };
+                    st.last_auto_logical_h = Some(target_h);
+                    st.needs_redraw = true;
+                    st.dirty_only_rect = None;
+                    st.dpi
+                };
+                let (fixed_w, target_outer_h) = outer_size_for_dpi(
+                    COMPACT_CLIENT_LOGICAL_W,
+                    target_h,
+                    MAIN_WINDOW_STYLE,
+                    dpi,
+                );
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        0,
+                        0,
+                        fixed_w,
+                        target_outer_h,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    InvalidateRect(hwnd, null(), 0);
+                    UpdateWindow(hwnd);
+                }
+            }
 
             if request_followup {
                 unsafe {
@@ -1233,6 +1288,7 @@ unsafe extern "system" fn wnd_proc(
             }
             st.events = Vec::new();
             st.followup_paint_budget = 0;
+            st.last_auto_logical_h = None;
 
             match st.role {
                 WindowRole::Editor => {

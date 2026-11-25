@@ -44,6 +44,7 @@ fn main() {
     let mut smoke_hold_ms: u64 = 1200;
     let mut smoke_dual_pad = false;
     let mut preview_cards = false;
+    let mut preview_one_collapsed = false;
     let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
     let mut show_editor_profile: Option<String> = None;
@@ -78,6 +79,7 @@ fn main() {
             }
             "--smoke-dual-pad" => smoke_dual_pad = true,
             "--preview-cards" => preview_cards = true,
+            "--preview-one-collapsed" => preview_one_collapsed = true,
             "--live-demo-pad" => live_demo_pad = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
@@ -199,7 +201,9 @@ fn main() {
         open_immediately = true;
     }
 
-    let preview = if preview_cards {
+    let preview = if preview_one_collapsed {
+        Some(vec![build_preview_cards().into_iter().next().unwrap()])
+    } else if preview_cards {
         Some(build_preview_cards())
     } else {
         None
