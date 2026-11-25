@@ -29,7 +29,6 @@ fn main() {
     println!("cargo:rerun-if-changed=app.rc");
     println!("cargo:rerun-if-changed=assets/z-controller.ico");
     println!("cargo:rerun-if-changed=../../icon.svg");
-    println!("cargo:rerun-if-changed=../../icon.svg");
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
