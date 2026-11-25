@@ -49,3 +49,7 @@ The compiled executable is written to `target\release\z-controller.exe`.
 - [SDL_GameControllerDB (`gamecontrollerdb`)](https://github.com/mdqinc/SDL_GameControllerDB) — community controller mapping database
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus) — Windows kernel-mode virtual Xbox 360 & DualShock 4 gamepad emulation
 - [HidHide](https://github.com/nefarius/HidHide) — per-application HID device cloaking driver
+
+## License
+
+`z-controller` is licensed under the [MIT License](LICENSE). Third-party components keep their own licenses — see [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
