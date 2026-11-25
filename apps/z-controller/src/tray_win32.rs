@@ -182,6 +182,23 @@ fn outer_size_for_dpi(
     }
 }
 
+/// Computes outer window size for an existing HWND using its desired logical client size
+/// (`logical_dpi`) plus the OS non-client frame size at the window's actual monitor DPI.
+fn outer_size_for_hwnd(
+    hwnd: HWND,
+    client_logical_w: i32,
+    client_logical_h: i32,
+    style: u32,
+    logical_dpi: u32,
+) -> (i32, i32) {
+    let ppp = dpi_to_ppp(logical_dpi);
+    let client_w = (client_logical_w as f32 * ppp).round() as i32;
+    let client_h = (client_logical_h as f32 * ppp).round() as i32;
+    let nc_dpi = get_dpi_for_window(hwnd);
+    let (nc_outer_w, nc_outer_h) = outer_size_for_dpi(0, 0, style, nc_dpi);
+    (client_w + nc_outer_w, client_h + nc_outer_h)
+}
+
 fn sync_window_dpi_and_bounds(
     hwnd: HWND,
     style: u32,
@@ -219,7 +236,7 @@ fn send_test_dpi_change(
 ) {
     let mut rc: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(hwnd, &mut rc) };
-    let (outer_w, outer_h) = outer_size_for_dpi(client_logical_w, client_logical_h, style, dpi);
+    let (outer_w, outer_h) = outer_size_for_hwnd(hwnd, client_logical_w, client_logical_h, style, dpi);
     let suggested = RECT {
         left: rc.left,
         top: rc.top,
@@ -1125,7 +1142,8 @@ unsafe extern "system" fn wnd_proc(
                     st.dirty_only_rect = None;
                     st.dpi
                 };
-                let (fixed_w, target_outer_h) = outer_size_for_dpi(
+                let (fixed_w, target_outer_h) = outer_size_for_hwnd(
+                    hwnd,
                     COMPACT_CLIENT_LOGICAL_W,
                     target_h,
                     MAIN_WINDOW_STYLE,
