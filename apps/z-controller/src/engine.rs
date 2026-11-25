@@ -17,7 +17,7 @@ use z_core::model::{
     ControllerFamily, DisconnectPolicy, HardwareKey, LogicalButton, PhysicalGamepadState,
     Transport, VirtualOutputReport, VirtualTargetKind,
 };
-use z_core::profile::{AppConfig, Profile};
+use z_core::profile::{AppConfig, Profile, ThemeMode};
 use z_platform_windows::backend_impl::WindowsOutputBackend;
 use z_platform_windows::drivers::{self, DriverInstallOutcome};
 use z_platform_windows::hidhide;
@@ -151,6 +151,7 @@ pub enum EngineCommand {
         key: HardwareKey,
         show_live_input: bool,
     },
+    SetThemeMode(ThemeMode),
     UpsertProfile(Profile),
     DeleteProfile(String),
     InstallDrivers,
@@ -895,6 +896,10 @@ fn handle_ui_command(
         } => {
             // Purely visual UI preference: persist without touching SDL pads or virtual output slots.
             config.set_device_show_live_input(&key, show_live_input);
+            let _ = config.save_atomic(config_path);
+        }
+        EngineCommand::SetThemeMode(mode) => {
+            config.theme_mode = mode;
             let _ = config.save_atomic(config_path);
         }
         EngineCommand::UpsertProfile(profile) => {

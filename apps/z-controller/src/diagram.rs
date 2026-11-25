@@ -5,8 +5,7 @@ use z_core::profile::Profile;
 
 use crate::engine::PhysicalSnapshot;
 use crate::ui::{
-    BG_NEAR_BLACK, LOGO_BLUE, LOGO_LAVENDER, LOGO_PINK, SUBTLE_BORDER, TEXT_MUTED, TEXT_PRIMARY,
-    normalize_stick_axis, normalize_trigger_axis,
+    LOGO_BLUE, LOGO_LAVENDER, LOGO_PINK, ThemePalette, normalize_stick_axis, normalize_trigger_axis,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +111,7 @@ pub fn draw_controller_diagram(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) -> Rect {
     let spec = family_spec(family);
     let avail_w = ui.available_width().max(460.0);
@@ -120,8 +120,8 @@ pub fn draw_controller_diagram(
 
     {
         let p = ui.painter();
-        p.rect_filled(canvas, Rounding::same(8.0), BG_NEAR_BLACK);
-        p.rect_stroke(canvas, Rounding::same(8.0), Stroke::new(1.0_f32, SUBTLE_BORDER));
+        p.rect_filled(canvas, Rounding::same(8.0), pal.bg);
+        p.rect_stroke(canvas, Rounding::same(8.0), Stroke::new(1.0_f32, pal.border));
 
         // Fit clean fixed-aspect controller illustration inside canvas.
         let stage_w = (canvas.width() - 24.0).min(486.0);
@@ -140,16 +140,18 @@ pub fn draw_controller_diagram(
             lt_rect,
             spec.lt_label,
             phys.map_or(0.0, |s| normalize_trigger_axis(s.left_trigger)),
+            pal,
         );
         paint_trigger_bar(
             p,
             rt_rect,
             spec.rt_label,
             phys.map_or(0.0, |s| normalize_trigger_axis(s.right_trigger)),
+            pal,
         );
 
         // Smooth symmetric Bezier body silhouette + subtle contour seams
-        paint_controller_silhouette(p, stage, family);
+        paint_controller_silhouette(p, stage, family, pal);
 
         // Shoulders (sleek rounded horizontal bars hugging the upper crown)
         let lb_rect = Rect::from_center_size(pt(Pos2::new(0.285, 0.225)), Vec2::new(84.0, 17.0));
@@ -164,6 +166,7 @@ pub fn draw_controller_diagram(
             profile,
             phys,
             selected_button,
+            pal,
         );
         draw_bar_button(
             ui,
@@ -175,6 +178,7 @@ pub fn draw_controller_diagram(
             profile,
             phys,
             selected_button,
+            pal,
         );
 
         // Analog Sticks (ringed outer well + inner thumb cap + center/deflected dot)
@@ -188,6 +192,7 @@ pub fn draw_controller_diagram(
             profile,
             phys,
             selected_button,
+            pal,
         );
         draw_stick_assembly(
             ui,
@@ -199,10 +204,11 @@ pub fn draw_controller_diagram(
             profile,
             phys,
             selected_button,
+            pal,
         );
 
         // Unified Plus-Shaped D-Pad
-        draw_plus_dpad(ui, pt(spec.dpad_rel), profile, phys, selected_button);
+        draw_plus_dpad(ui, pt(spec.dpad_rel), profile, phys, selected_button, pal);
 
         // Uniform Circular Face Buttons ([North, West, East, South])
         let fc = pt(spec.face_center_rel);
@@ -214,7 +220,7 @@ pub fn draw_controller_diagram(
             (LogicalButton::South, Pos2::new(fc.x, fc.y + d), spec.face_glyphs[3]),
         ];
         for (btn, pos, glyph) in face_defs {
-            draw_face_circle(ui, pos, 11.8, btn, glyph, profile, phys, selected_button);
+            draw_face_circle(ui, pos, 11.8, btn, glyph, profile, phys, selected_button, pal);
         }
 
         // Center Cluster (real vector symbols — zero cramped abbreviations)
@@ -232,6 +238,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 let cr_rect =
                     Rect::from_center_size(pt(Pos2::new(0.365, 0.315)), Vec2::new(13.0, 22.0));
@@ -247,6 +254,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_bar_button(
                     ui,
@@ -258,6 +266,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_center_circle(
                     ui,
@@ -268,6 +277,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 let mic_rect =
                     Rect::from_center_size(pt(Pos2::new(0.50, 0.62)), Vec2::new(26.0, 12.0));
@@ -281,6 +291,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
             }
             ControllerFamily::Nintendo => {
@@ -293,6 +304,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_center_circle(
                     ui,
@@ -303,6 +315,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 let cap_rect =
                     Rect::from_center_size(pt(Pos2::new(0.44, 0.505)), Vec2::new(19.0, 19.0));
@@ -316,6 +329,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_center_circle(
                     ui,
@@ -326,6 +340,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
             }
             ControllerFamily::Xbox | ControllerFamily::Generic => {
@@ -338,6 +353,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_center_circle(
                     ui,
@@ -348,6 +364,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 draw_center_circle(
                     ui,
@@ -358,6 +375,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
                 let shr_rect =
                     Rect::from_center_size(pt(Pos2::new(0.50, 0.535)), Vec2::new(26.0, 14.0));
@@ -371,6 +389,7 @@ pub fn draw_controller_diagram(
                     profile,
                     phys,
                     selected_button,
+                    pal,
                 );
             }
         }
@@ -384,7 +403,7 @@ pub fn draw_controller_diagram(
         ];
         for (rel, lbl, btn) in paddles {
             let r = Rect::from_center_size(pt(rel), Vec2::new(34.0, 17.0));
-            draw_bar_button(ui, r, 5.0, Some(lbl), None, btn, profile, phys, selected_button);
+            draw_bar_button(ui, r, 5.0, Some(lbl), None, btn, profile, phys, selected_button, pal);
         }
 
         let p = ui.painter();
@@ -393,7 +412,7 @@ pub fn draw_controller_diagram(
             Align2::CENTER_CENTER,
             "Click part to select",
             FontId::new(10.0, FontFamily::Proportional),
-            TEXT_MUTED,
+            pal.muted,
         );
     }
 
@@ -567,14 +586,18 @@ fn ear_clip_polygon(pts: &[Pos2]) -> Vec<[usize; 3]> {
     tris
 }
 
-fn paint_controller_silhouette(p: &egui::Painter, stage: Rect, family: ControllerFamily) {
+fn paint_controller_silhouette(
+    p: &egui::Painter,
+    stage: Rect,
+    family: ControllerFamily,
+    pal: &ThemePalette,
+) {
     let outline = family_body_polygon(stage, family);
     let tris = ear_clip_polygon(&outline);
 
-    let body_fill = Color32::from_rgb(19, 19, 31);
     let mut mesh = Mesh::default();
     for &pos in &outline {
-        mesh.colored_vertex(pos, body_fill);
+        mesh.colored_vertex(pos, pal.diagram_body);
     }
     for [a, b, c] in tris {
         mesh.add_triangle(a as u32, b as u32, c as u32);
@@ -588,11 +611,10 @@ fn paint_controller_silhouette(p: &egui::Painter, stage: Rect, family: Controlle
     )));
     p.add(Shape::Path(PathShape::closed_line(
         outline,
-        Stroke::new(1.3_f32, Color32::from_rgb(56, 56, 86)),
+        Stroke::new(1.3_f32, pal.diagram_body_stroke),
     )));
 
     // Subtle interior grip seam curves matching real controller tooling
-    let seam_col = Color32::from_rgb(32, 32, 50);
     let sx = |nx: f32| stage.left() + nx * stage.width();
     let sy = |ny: f32| stage.top() + ny * stage.height();
     for side in [1.0_f32, -1.0_f32] {
@@ -610,13 +632,19 @@ fn paint_controller_silhouette(p: &egui::Painter, stage: Rect, family: Controlle
                 Pos2::new(map_x(c[0]), sy(c[1]))
             })
             .collect();
-        p.add(Shape::line(pts, Stroke::new(1.0_f32, seam_col)));
+        p.add(Shape::line(pts, Stroke::new(1.0_f32, pal.diagram_seam)));
     }
 }
 
-fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
+fn paint_trigger_bar(
+    p: &egui::Painter,
+    rect: Rect,
+    label: &str,
+    value: f32,
+    pal: &ThemePalette,
+) {
     let pressed = value > 0.05;
-    let border = if pressed { LOGO_PINK } else { Color32::from_rgb(48, 48, 74) };
+    let border = if pressed { LOGO_PINK } else { pal.diagram_ctrl_stroke };
     if pressed {
         p.rect_stroke(
             rect.expand(1.5),
@@ -624,7 +652,7 @@ fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
             Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 64)),
         );
     }
-    p.rect_filled(rect, Rounding::same(7.0), Color32::from_rgb(20, 20, 34));
+    p.rect_filled(rect, Rounding::same(7.0), pal.diagram_ctrl_fill);
     p.rect_stroke(
         rect,
         Rounding::same(7.0),
@@ -635,7 +663,7 @@ fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
         Pos2::new(rect.left() + 5.0, rect.bottom() - 6.0),
         Pos2::new(rect.right() - 5.0, rect.bottom() - 2.5),
     );
-    p.rect_filled(bar, Rounding::same(1.5), BG_NEAR_BLACK);
+    p.rect_filled(bar, Rounding::same(1.5), pal.bg);
     if value > 0.01 {
         let fw = (bar.width() * value.clamp(0.0, 1.0)).max(2.0);
         p.rect_filled(
@@ -649,7 +677,7 @@ fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
         Align2::CENTER_CENTER,
         label,
         FontId::new(10.5, FontFamily::Proportional),
-        if pressed { TEXT_PRIMARY } else { TEXT_MUTED },
+        if pressed { pal.text } else { pal.muted },
     );
 }
 
@@ -658,26 +686,27 @@ fn button_visuals(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: Option<LogicalButton>,
+    pal: &ThemePalette,
 ) -> (bool, bool, bool, Color32, Stroke) {
     let pressed = phys.is_some_and(|s| (s.buttons_mask & btn.bit()) != 0);
     let selected = selected_button == Some(btn);
     let remapped = profile.button_remap.contains_key(&btn);
 
     let fill = if pressed {
-        Color32::from_rgb(42, 24, 38)
+        pal.pill_pink_fill
     } else if selected {
-        Color32::from_rgb(20, 32, 46)
+        pal.pill_blue_fill
     } else {
-        Color32::from_rgb(24, 24, 40)
+        pal.diagram_ctrl_fill
     };
     let stroke = if pressed {
         Stroke::new(1.8_f32, LOGO_PINK)
     } else if selected {
-        Stroke::new(1.8_f32, LOGO_BLUE)
+        Stroke::new(1.8_f32, pal.accent_line)
     } else if remapped {
         Stroke::new(1.2_f32, LOGO_LAVENDER)
     } else {
-        Stroke::new(1.1_f32, Color32::from_rgb(54, 54, 82))
+        Stroke::new(1.1_f32, pal.diagram_ctrl_stroke)
     };
     (pressed, selected, remapped, fill, stroke)
 }
@@ -702,7 +731,14 @@ fn paint_selection_glow_circle(p: &egui::Painter, center: Pos2, radius: f32, col
     }
 }
 
-fn paint_center_icon(p: &egui::Painter, center: Pos2, rect: Rect, icon: CenterVisual, color: Color32) {
+fn paint_center_icon(
+    p: &egui::Painter,
+    center: Pos2,
+    rect: Rect,
+    icon: CenterVisual,
+    color: Color32,
+    pal: &ThemePalette,
+) {
     let st = Stroke::new(1.4_f32, color);
     match icon {
         CenterVisual::XboxLogo => {
@@ -722,7 +758,7 @@ fn paint_center_icon(p: &egui::Painter, center: Pos2, rect: Rect, icon: CenterVi
             let back = Rect::from_min_size(Pos2::new(center.x - 4.5, center.y - 4.5), Vec2::splat(6.0));
             let front = Rect::from_min_size(Pos2::new(center.x - 1.5, center.y - 1.5), Vec2::splat(6.0));
             p.rect_stroke(back, Rounding::same(0.5), Stroke::new(1.1_f32, color));
-            p.rect_filled(front, Rounding::same(0.5), Color32::from_rgb(24, 24, 40));
+            p.rect_filled(front, Rounding::same(0.5), pal.diagram_ctrl_fill);
             p.rect_stroke(front, Rounding::same(0.5), Stroke::new(1.1_f32, color));
         }
         CenterVisual::MenuLines => {
@@ -843,13 +879,14 @@ fn draw_bar_button(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) {
     let resp = ui.interact(rect, ui.id().with(("diag_btn", btn)), Sense::click());
     if resp.clicked() {
         *selected_button = Some(btn);
     }
     let (pressed, selected, remapped, fill, stroke) =
-        button_visuals(btn, profile, phys, *selected_button);
+        button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
         paint_selection_glow_rect(p, rect, rounding, if pressed { LOGO_PINK } else { LOGO_BLUE });
@@ -857,7 +894,7 @@ fn draw_bar_button(
     p.rect_filled(rect, Rounding::same(rounding), fill);
     p.rect_stroke(rect, Rounding::same(rounding), stroke);
 
-    let fg = if pressed || selected { TEXT_PRIMARY } else { TEXT_MUTED };
+    let fg = if pressed || selected { pal.text } else { pal.muted };
     if let Some(txt) = label {
         p.text(
             rect.center(),
@@ -868,7 +905,7 @@ fn draw_bar_button(
         );
     }
     if let Some(vis) = icon {
-        paint_center_icon(p, rect.center(), rect, vis, fg);
+        paint_center_icon(p, rect.center(), rect, vis, fg, pal);
     }
     if remapped && !pressed && !selected {
         p.circle_filled(Pos2::new(rect.right() - 4.0, rect.top() + 4.0), 2.0, LOGO_LAVENDER);
@@ -885,6 +922,7 @@ fn draw_center_circle(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) {
     let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
     let resp = ui.interact(rect, ui.id().with(("diag_center", btn)), Sense::click());
@@ -892,15 +930,15 @@ fn draw_center_circle(
         *selected_button = Some(btn);
     }
     let (pressed, selected, remapped, fill, stroke) =
-        button_visuals(btn, profile, phys, *selected_button);
+        button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
         paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
-    let fg = if pressed || selected { TEXT_PRIMARY } else { TEXT_MUTED };
-    paint_center_icon(p, center, rect, icon, fg);
+    let fg = if pressed || selected { pal.text } else { pal.muted };
+    paint_center_icon(p, center, rect, icon, fg, pal);
     if remapped && !pressed && !selected {
         p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.0, LOGO_LAVENDER);
     }
@@ -916,6 +954,7 @@ fn draw_face_circle(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) {
     let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
     let resp = ui.interact(rect, ui.id().with(("diag_face", btn)), Sense::click());
@@ -923,7 +962,7 @@ fn draw_face_circle(
         *selected_button = Some(btn);
     }
     let (pressed, selected, remapped, fill, stroke) =
-        button_visuals(btn, profile, phys, *selected_button);
+        button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
         paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
@@ -931,7 +970,7 @@ fn draw_face_circle(
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
 
-    let fg = if pressed || selected { TEXT_PRIMARY } else { TEXT_MUTED };
+    let fg = if pressed || selected { pal.text } else { pal.muted };
     match glyph {
         FaceGlyph::Text(t) => {
             p.text(
@@ -988,6 +1027,7 @@ fn draw_plus_dpad(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) {
     let hw = 7.2_f32;
     let arm_len = 21.5_f32;
@@ -1012,10 +1052,9 @@ fn draw_plus_dpad(
     {
         let p = ui.painter();
         let tris = ear_clip_polygon(&plus_pts);
-        let base_fill = Color32::from_rgb(24, 24, 40);
         let mut mesh = Mesh::default();
         for &pos in &plus_pts {
-            mesh.colored_vertex(pos, base_fill);
+            mesh.colored_vertex(pos, pal.diagram_ctrl_fill);
         }
         for [a, b, d] in tris {
             mesh.add_triangle(a as u32, b as u32, d as u32);
@@ -1023,7 +1062,7 @@ fn draw_plus_dpad(
         p.add(Shape::mesh(mesh));
         p.add(Shape::Path(PathShape::closed_line(
             plus_pts,
-            Stroke::new(1.2_f32, Color32::from_rgb(56, 56, 84)),
+            Stroke::new(1.2_f32, pal.diagram_ctrl_stroke),
         )));
     }
 
@@ -1073,7 +1112,7 @@ fn draw_plus_dpad(
             *selected_button = Some(btn);
         }
         let (pressed, selected, remapped, fill, stroke) =
-            button_visuals(btn, profile, phys, *selected_button);
+            button_visuals(btn, profile, phys, *selected_button, pal);
         let p = ui.painter();
         if pressed || selected {
             paint_selection_glow_rect(p, rect, 3.0, if pressed { LOGO_PINK } else { LOGO_BLUE });
@@ -1082,14 +1121,14 @@ fn draw_plus_dpad(
         } else if remapped {
             p.rect_stroke(rect, Rounding::same(2.5), stroke);
         }
-        let tri_col = if pressed || selected { TEXT_PRIMARY } else { TEXT_MUTED };
+        let tri_col = if pressed || selected { pal.text } else { pal.muted };
         p.add(Shape::convex_polygon(chevron.to_vec(), tri_col, Stroke::NONE));
     }
 
     // Center concave pivot ring
     let p = ui.painter();
-    p.circle_filled(c, 4.8, BG_NEAR_BLACK);
-    p.circle_stroke(c, 4.8, Stroke::new(1.0_f32, Color32::from_rgb(44, 44, 68)));
+    p.circle_filled(c, 4.8, pal.bg);
+    p.circle_stroke(c, 4.8, Stroke::new(1.0_f32, pal.diagram_ctrl_stroke));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1103,6 +1142,7 @@ fn draw_stick_assembly(
     profile: &Profile,
     phys: Option<&PhysicalSnapshot>,
     selected_button: &mut Option<LogicalButton>,
+    pal: &ThemePalette,
 ) {
     let rect = Rect::from_center_size(center, Vec2::splat(radius * 2.0));
     let resp = ui.interact(rect, ui.id().with(("diag_stick", click_btn)), Sense::click());
@@ -1110,19 +1150,19 @@ fn draw_stick_assembly(
         *selected_button = Some(click_btn);
     }
     let (pressed, selected, remapped, _fill, stroke) =
-        button_visuals(click_btn, profile, phys, *selected_button);
+        button_visuals(click_btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
         paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     // Outer gate well + inner ringed thumbstick cap
-    p.circle_filled(center, radius, BG_NEAR_BLACK);
+    p.circle_filled(center, radius, pal.bg);
     p.circle_stroke(center, radius, stroke);
-    p.circle_filled(center, radius * 0.68, Color32::from_rgb(20, 20, 34));
+    p.circle_filled(center, radius * 0.68, pal.diagram_ctrl_fill);
     p.circle_stroke(
         center,
         radius * 0.68,
-        Stroke::new(1.0_f32, Color32::from_rgb(46, 46, 72)),
+        Stroke::new(1.0_f32, pal.diagram_ctrl_stroke),
     );
 
     let mag = (x * x + y * y).sqrt();
@@ -1204,13 +1244,14 @@ mod tests {
             ControllerFamily::Nintendo,
         ] {
             let mut sel = Some(LogicalButton::Misc1);
+            let pal = ThemePalette::for_mode(z_core::profile::ThemeMode::Dark);
             let raw = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0))),
                 ..Default::default()
             };
             let out = ctx.run(raw, |c| {
                 egui::CentralPanel::default().show(c, |ui| {
-                    let rect = draw_controller_diagram(ui, fam, &prof, Some(&phys), &mut sel);
+                    let rect = draw_controller_diagram(ui, fam, &prof, Some(&phys), &mut sel, &pal);
                     assert!(rect.width() > 300.0 && rect.height() > 250.0);
                 });
             });

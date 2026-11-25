@@ -8,7 +8,7 @@ use egui::{
 };
 use z_core::battery::BatteryStatus;
 use z_core::model::{ControllerFamily, DisconnectPolicy, LogicalButton, VirtualTargetKind};
-use z_core::profile::Profile;
+use z_core::profile::{Profile, ThemeMode};
 use z_platform_windows::drivers::query_process_memory_bytes;
 
 use crate::diagram::draw_controller_diagram;
@@ -16,15 +16,9 @@ use crate::engine::{
     EngineCommand, EngineHandle, EngineSnapshot, PhysicalSnapshot,
 };
 
-// Modern WT logo-on-black palette (accents strictly for accents, edges, bars, and dots — never large fills or body text).
-pub const BG_NEAR_BLACK: Color32 = Color32::from_rgb(10, 10, 16); // #0A0A10
-pub const PANEL_SURFACE: Color32 = Color32::from_rgb(20, 20, 31); // #14141F
-pub const WIDGET_SURFACE: Color32 = Color32::from_rgb(24, 24, 38);
-pub const WIDGET_HOVER: Color32 = Color32::from_rgb(31, 31, 49);
-pub const WIDGET_ACTIVE: Color32 = Color32::from_rgb(24, 34, 48);
-pub const SUBTLE_BORDER: Color32 = Color32::from_rgb(38, 38, 58); // #26263A
-
+// WT logo accent constants shared across Dark and Light ThemePalette modes.
 pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
+pub const LOGO_BLUE_READABLE: Color32 = Color32::from_rgb(47, 155, 232); // #2F9BE8 (light-mode thin lines & small text)
 #[allow(dead_code)]
 pub const LOGO_BLUE_MID: Color32 = Color32::from_rgb(124, 208, 250); // #7CD0FA
 #[allow(dead_code)]
@@ -34,8 +28,79 @@ pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 168, 216); // #F7A8D8
 pub const LOGO_PINK_LIGHT: Color32 = Color32::from_rgb(255, 199, 227); // #FFC7E3
 pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(216, 166, 255); // #D8A6FF
 
-pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(237, 237, 242); // #EDEDF2
-pub const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 176); // #9A9AB0
+#[derive(Debug, Clone, Copy)]
+pub struct ThemePalette {
+    pub bg: Color32,
+    pub panel: Color32,
+    pub border: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    pub faint_bg: Color32,
+    pub widget: Color32,
+    pub widget_hover: Color32,
+    pub widget_active: Color32,
+    /// Accent used for thin strokes, borders, and small text (#54B9F2 dark, #2F9BE8 light).
+    pub accent_line: Color32,
+    pub pill_blue_fill: Color32,
+    pub pill_pink_fill: Color32,
+    pub row_selected_fill: Color32,
+    pub diagram_body: Color32,
+    pub diagram_body_stroke: Color32,
+    pub diagram_seam: Color32,
+    pub diagram_ctrl_fill: Color32,
+    pub diagram_ctrl_stroke: Color32,
+    pub crosshair: Color32,
+}
+
+impl ThemePalette {
+    #[must_use]
+    pub fn for_mode(mode: ThemeMode) -> Self {
+        match mode {
+            ThemeMode::Dark => Self {
+                bg: Color32::from_rgb(10, 10, 16),        // #0A0A10
+                panel: Color32::from_rgb(20, 20, 31),     // #14141F
+                border: Color32::from_rgb(38, 38, 58),    // #26263A
+                text: Color32::from_rgb(237, 237, 242),   // #EDEDF2
+                muted: Color32::from_rgb(154, 154, 176),  // #9A9AB0
+                faint_bg: Color32::from_rgb(16, 16, 26),
+                widget: Color32::from_rgb(24, 24, 38),
+                widget_hover: Color32::from_rgb(31, 31, 49),
+                widget_active: Color32::from_rgb(24, 34, 48),
+                accent_line: LOGO_BLUE,
+                pill_blue_fill: Color32::from_rgb(18, 28, 40),
+                pill_pink_fill: Color32::from_rgb(38, 22, 34),
+                row_selected_fill: Color32::from_rgb(20, 30, 44),
+                diagram_body: Color32::from_rgb(19, 19, 31),
+                diagram_body_stroke: Color32::from_rgb(56, 56, 86),
+                diagram_seam: Color32::from_rgb(32, 32, 50),
+                diagram_ctrl_fill: Color32::from_rgb(24, 24, 40),
+                diagram_ctrl_stroke: Color32::from_rgb(54, 54, 82),
+                crosshair: Color32::from_rgb(28, 28, 44),
+            },
+            ThemeMode::Light => Self {
+                bg: Color32::from_rgb(238, 244, 250),     // #EEF4FA
+                panel: Color32::from_rgb(255, 255, 255),  // #FFFFFF
+                border: Color32::from_rgb(217, 228, 240), // #D9E4F0
+                text: Color32::from_rgb(28, 39, 51),      // #1C2733
+                muted: Color32::from_rgb(95, 113, 134),   // #5F7186
+                faint_bg: Color32::from_rgb(244, 248, 252),
+                widget: Color32::from_rgb(245, 248, 252),
+                widget_hover: Color32::from_rgb(233, 242, 250),
+                widget_active: Color32::from_rgb(220, 235, 248),
+                accent_line: LOGO_BLUE_READABLE,          // #2F9BE8
+                pill_blue_fill: Color32::from_rgb(235, 246, 255),
+                pill_pink_fill: Color32::from_rgb(253, 241, 249),
+                row_selected_fill: Color32::from_rgb(235, 245, 255),
+                diagram_body: Color32::from_rgb(244, 248, 253),
+                diagram_body_stroke: Color32::from_rgb(190, 206, 224),
+                diagram_seam: Color32::from_rgb(217, 228, 240),
+                diagram_ctrl_fill: Color32::from_rgb(255, 255, 255),
+                diagram_ctrl_stroke: Color32::from_rgb(196, 211, 228),
+                crosshair: Color32::from_rgb(217, 228, 240),
+            },
+        }
+    }
+}
 
 // Consistent 4 / 8 / 12 / 16 spacing scale applied uniformly across all panels, cards, and grids.
 pub const SPACE_XS: f32 = 4.0;
@@ -63,6 +128,7 @@ pub struct AppUiState {
     pub last_dynamic_rect_main: Option<Rect>,
     pub last_dynamic_rect_editor: Option<Rect>,
     pub desired_compact_logical_h: Option<f32>,
+    pub applied_theme: Option<ThemeMode>,
 }
 
 impl Default for AppUiState {
@@ -76,6 +142,7 @@ impl Default for AppUiState {
             last_dynamic_rect_main: None,
             last_dynamic_rect_editor: None,
             desired_compact_logical_h: None,
+            applied_theme: None,
         }
     }
 }
@@ -115,6 +182,7 @@ pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
     snap.driver_status.hidhide_accessible.hash(&mut h);
     snap.driver_status.reboot_recommended.hash(&mut h);
     snap.last_status_message.hash(&mut h);
+    (snap.config.theme_mode as u8).hash(&mut h);
     snap.config.default_profile_id.hash(&mut h);
     snap.config.profiles.len().hash(&mut h);
 
@@ -132,6 +200,69 @@ pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
         c.present_buttons_mask.hash(&mut h);
     }
     h.finish()
+}
+
+pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
+    let pal = ThemePalette::for_mode(mode);
+    let mut style = (*ctx.style()).clone();
+    let mut visuals = match mode {
+        ThemeMode::Dark => egui::Visuals::dark(),
+        ThemeMode::Light => egui::Visuals::light(),
+    };
+    visuals.dark_mode = mode == ThemeMode::Dark;
+    visuals.panel_fill = pal.bg;
+    visuals.window_fill = pal.panel;
+    visuals.extreme_bg_color = pal.bg;
+    visuals.faint_bg_color = pal.faint_bg;
+    visuals.code_bg_color = pal.bg;
+    visuals.override_text_color = Some(pal.text);
+    visuals.window_rounding = Rounding::same(8.0);
+    visuals.menu_rounding = Rounding::same(6.0);
+    visuals.window_stroke = Stroke::new(1.0_f32, pal.border);
+    visuals.window_shadow = Shadow::NONE;
+    visuals.popup_shadow = Shadow::NONE;
+
+    visuals.widgets.noninteractive.bg_fill = pal.panel;
+    visuals.widgets.noninteractive.weak_bg_fill = pal.panel;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, pal.border);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, pal.muted);
+    visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
+
+    visuals.widgets.inactive.bg_fill = pal.widget;
+    visuals.widgets.inactive.weak_bg_fill = pal.widget;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, pal.border);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.inactive.rounding = Rounding::same(6.0);
+
+    visuals.widgets.hovered.bg_fill = pal.widget_hover;
+    visuals.widgets.hovered.weak_bg_fill = pal.widget_hover;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, pal.accent_line);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.hovered.rounding = Rounding::same(6.0);
+
+    visuals.widgets.active.bg_fill = pal.widget_active;
+    visuals.widgets.active.weak_bg_fill = pal.widget_active;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, LOGO_PINK);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.active.rounding = Rounding::same(6.0);
+
+    visuals.widgets.open.bg_fill = pal.widget_hover;
+    visuals.widgets.open.weak_bg_fill = pal.widget_hover;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, pal.accent_line);
+    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, pal.text);
+    visuals.widgets.open.rounding = Rounding::same(6.0);
+
+    let sel_tint = if mode == ThemeMode::Dark {
+        Color32::from_rgba_unmultiplied(84, 185, 242, 42)
+    } else {
+        Color32::from_rgba_unmultiplied(84, 185, 242, 64)
+    };
+    visuals.selection.bg_fill = sel_tint;
+    visuals.selection.stroke = Stroke::new(1.0_f32, pal.accent_line);
+
+    style.visuals = visuals;
+    style.animation_time = 0.0;
+    ctx.set_style(style);
 }
 
 pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
@@ -154,59 +285,11 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
         (TextStyle::Small, FontId::new(11.5, FontFamily::Proportional)),
         (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
     ]);
-
-    let mut visuals = egui::Visuals::dark();
-    visuals.dark_mode = true;
-    visuals.panel_fill = BG_NEAR_BLACK;
-    visuals.window_fill = PANEL_SURFACE;
-    visuals.extreme_bg_color = BG_NEAR_BLACK;
-    visuals.faint_bg_color = Color32::from_rgb(16, 16, 26);
-    visuals.code_bg_color = BG_NEAR_BLACK;
-    visuals.override_text_color = Some(TEXT_PRIMARY);
-    visuals.window_rounding = Rounding::same(8.0);
-    visuals.menu_rounding = Rounding::same(6.0);
-    visuals.window_stroke = Stroke::new(1.0_f32, SUBTLE_BORDER);
-    visuals.window_shadow = Shadow::NONE;
-    visuals.popup_shadow = Shadow::NONE;
-
-    visuals.widgets.noninteractive.bg_fill = PANEL_SURFACE;
-    visuals.widgets.noninteractive.weak_bg_fill = PANEL_SURFACE;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, SUBTLE_BORDER);
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT_MUTED);
-    visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
-
-    visuals.widgets.inactive.bg_fill = WIDGET_SURFACE;
-    visuals.widgets.inactive.weak_bg_fill = WIDGET_SURFACE;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, SUBTLE_BORDER);
-    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
-    visuals.widgets.inactive.rounding = Rounding::same(6.0);
-
-    visuals.widgets.hovered.bg_fill = WIDGET_HOVER;
-    visuals.widgets.hovered.weak_bg_fill = WIDGET_HOVER;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, LOGO_BLUE);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
-    visuals.widgets.hovered.rounding = Rounding::same(6.0);
-
-    visuals.widgets.active.bg_fill = WIDGET_ACTIVE;
-    visuals.widgets.active.weak_bg_fill = WIDGET_ACTIVE;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, LOGO_PINK);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
-    visuals.widgets.active.rounding = Rounding::same(6.0);
-
-    visuals.widgets.open.bg_fill = WIDGET_HOVER;
-    visuals.widgets.open.weak_bg_fill = WIDGET_HOVER;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, LOGO_BLUE);
-    visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
-    visuals.widgets.open.rounding = Rounding::same(6.0);
-
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(84, 185, 242, 42);
-    visuals.selection.stroke = Stroke::new(1.0_f32, LOGO_BLUE);
-
-    style.visuals = visuals;
     style.animation_time = 0.0;
     style.spacing.item_spacing = Vec2::new(SPACE_SM, SPACE_SM);
     style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS + 1.0);
     ctx.set_style(style);
+    apply_theme_visuals(ctx, ThemeMode::Dark);
 }
 
 #[inline]
@@ -354,14 +437,48 @@ fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rou
     );
 }
 
-fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32) {
+fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32, pal: &ThemePalette) {
     let y = ui.cursor().top();
     ui.painter()
-        .line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(1.0_f32, SUBTLE_BORDER));
+        .line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(1.0_f32, pal.border));
     ui.add_space(SPACE_SM);
 }
 
-fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool) -> bool {
+fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalette) -> bool {
+    let size = Vec2::splat(22.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = resp.hovered();
+    let fill = if hovered { pal.widget_hover } else { pal.widget };
+    let p = ui.painter();
+    p.rect_filled(rect, Rounding::same(6.0), fill);
+    p.rect_stroke(
+        rect,
+        Rounding::same(6.0),
+        Stroke::new(1.0_f32, if hovered { pal.accent_line } else { pal.border }),
+    );
+    let c = rect.center();
+    match mode {
+        ThemeMode::Dark => {
+            // Sun glyph in dark mode (click switches to Light)
+            let fg = if hovered { pal.accent_line } else { pal.text };
+            p.circle_stroke(c, 3.1, Stroke::new(1.3_f32, fg));
+            for k in 0..8 {
+                let a = (k as f32) * (PI * 0.25);
+                let dir = Vec2::new(a.cos(), a.sin());
+                p.line_segment([c + dir * 4.8, c + dir * 6.8], Stroke::new(1.25_f32, fg));
+            }
+        }
+        ThemeMode::Light => {
+            // Crescent moon glyph in light mode (click switches to Dark)
+            let fg = pal.accent_line;
+            p.circle_filled(c + Vec2::new(-0.5, 0.2), 5.3, fg);
+            p.circle_filled(c + Vec2::new(2.2, -1.9), 4.4, fill);
+        }
+    }
+    resp.clicked()
+}
+
+fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool, pal: &ThemePalette) -> bool {
     let size = Vec2::splat(20.0);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = resp.hovered();
@@ -369,18 +486,15 @@ fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool) -> bool {
     p.rect_filled(
         rect,
         Rounding::same(5.0),
-        if hovered { WIDGET_HOVER } else { BG_NEAR_BLACK },
+        if hovered { pal.widget_hover } else { pal.bg },
     );
     p.rect_stroke(
         rect,
         Rounding::same(5.0),
-        Stroke::new(
-            1.0_f32,
-            if hovered { LOGO_BLUE } else { SUBTLE_BORDER },
-        ),
+        Stroke::new(1.0_f32, if hovered { pal.accent_line } else { pal.border }),
     );
     let c = rect.center();
-    let st = Stroke::new(1.5_f32, if hovered { TEXT_PRIMARY } else { TEXT_MUTED });
+    let st = Stroke::new(1.5_f32, if hovered { pal.text } else { pal.muted });
     if expanded {
         // Chevron down (expanded)
         p.line_segment([Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 2.5)], st);
@@ -398,15 +512,19 @@ fn draw_status_dot(ui: &mut egui::Ui, color: Color32) {
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
-fn draw_battery_bar(ui: &mut egui::Ui, battery: &z_core::battery::BatteryReading) {
+fn draw_battery_bar(
+    ui: &mut egui::Ui,
+    battery: &z_core::battery::BatteryReading,
+    pal: &ThemePalette,
+) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_SM;
-        ui.label(RichText::new("Battery:").small().color(TEXT_MUTED));
+        ui.label(RichText::new("Battery:").small().color(pal.muted));
         let bar_size = Vec2::new(124.0, 8.0);
         let (rect, _) = ui.allocate_exact_size(bar_size, egui::Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, Rounding::same(4.0), BG_NEAR_BLACK);
-        p.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0_f32, SUBTLE_BORDER));
+        p.rect_filled(rect, Rounding::same(4.0), pal.bg);
+        p.rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0_f32, pal.border));
 
         let fraction = match (battery.percent, battery.status) {
             (Some(pct), _) => (pct as f32 / 100.0).clamp(0.0, 1.0),
@@ -424,7 +542,7 @@ fn draw_battery_bar(ui: &mut egui::Ui, battery: &z_core::battery::BatteryReading
             );
         }
 
-        ui.label(RichText::new(battery.format_badge()).small().color(TEXT_PRIMARY));
+        ui.label(RichText::new(battery.format_badge()).small().color(pal.text));
     });
 }
 
@@ -454,6 +572,13 @@ pub fn draw_compact_main_snapshot(
         state.selected_controller = snap.controllers.first().map(|c| c.canonical_id.clone());
     }
 
+    let mode = snap.config.theme_mode;
+    if state.applied_theme != Some(mode) {
+        apply_theme_visuals(ctx, mode);
+        state.applied_theme = Some(mode);
+    }
+    let pal = ThemePalette::for_mode(mode);
+
     state.last_dynamic_rect_main = None;
     let ds = &snap.driver_status;
     let has_driver_alert = !ds.vigem_installed
@@ -467,7 +592,7 @@ pub fn draw_compact_main_snapshot(
         .exact_height(status_bar_h)
         .frame(
             egui::Frame::none()
-                .fill(PANEL_SURFACE)
+                .fill(pal.panel)
                 .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
@@ -475,15 +600,15 @@ pub fn draw_compact_main_snapshot(
             let top_y = ui.max_rect().top() - SPACE_SM;
             ui.painter().line_segment(
                 [Pos2::new(sr.left(), top_y), Pos2::new(sr.right(), top_y)],
-                Stroke::new(1.0_f32, SUBTLE_BORDER),
+                Stroke::new(1.0_f32, pal.border),
             );
-            draw_status_bar(ui, snap, has_driver_alert, &mut send);
+            draw_status_bar(ui, snap, has_driver_alert, &pal, &mut send);
         });
 
     egui::CentralPanel::default()
         .frame(
             egui::Frame::none()
-                .fill(BG_NEAR_BLACK)
+                .fill(pal.bg)
                 .inner_margin(Margin {
                     left: SPACE_MD,
                     right: SPACE_MD,
@@ -494,33 +619,37 @@ pub fn draw_compact_main_snapshot(
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("Controllers").color(TEXT_PRIMARY));
+                ui.heading(RichText::new("Controllers").color(pal.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_XS + 2.0;
                     if ui.small_button("Refresh").clicked() {
                         send(EngineCommand::RefreshStatus);
+                    }
+                    if draw_theme_toggle_button(ui, mode, &pal) {
+                        send(EngineCommand::SetThemeMode(mode.toggled()));
                     }
                 });
             });
             ui.add_space(SPACE_XS);
             let bounds = ui.available_rect_before_wrap();
-            draw_aligned_divider(ui, bounds.left(), bounds.right());
+            draw_aligned_divider(ui, bounds.left(), bounds.right(), &pal);
 
             if snap.controllers.is_empty() {
                 let empty_resp = egui::Frame::none()
-                    .fill(PANEL_SURFACE)
+                    .fill(pal.panel)
                     .rounding(CARD_ROUNDING)
-                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
                     .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.label(
-                            RichText::new("No physical controllers detected.").color(TEXT_PRIMARY),
+                            RichText::new("No physical controllers detected.").color(pal.text),
                         );
                         ui.add_space(SPACE_XS);
                         ui.label(
                             RichText::new("Connect a controller via Bluetooth or USB.")
                                 .small()
-                                .color(TEXT_MUTED),
+                                .color(pal.muted),
                         );
                     });
                 state.desired_compact_logical_h =
@@ -545,16 +674,16 @@ pub fn draw_compact_main_snapshot(
                                 let is_selected =
                                     state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
                                 let card_fill = if is_selected {
-                                    WIDGET_SURFACE
+                                    pal.widget
                                 } else {
-                                    PANEL_SURFACE
+                                    pal.panel
                                 };
                                 let card_stroke = if ctrl.virtual_active {
                                     Stroke::NONE
                                 } else {
                                     Stroke::new(
                                         1.0_f32,
-                                        if is_selected { LOGO_BLUE } else { SUBTLE_BORDER },
+                                        if is_selected { pal.accent_line } else { pal.border },
                                     )
                                 };
 
@@ -572,14 +701,14 @@ pub fn draw_compact_main_snapshot(
                                             let dot = if ctrl.connected {
                                                 LOGO_BLUE
                                             } else {
-                                                TEXT_MUTED
+                                                pal.muted
                                             };
                                             draw_status_dot(ui, dot);
                                             let title_resp = ui.add(
                                                 egui::Label::new(
                                                     RichText::new(&ctrl.name)
                                                         .strong()
-                                                        .color(TEXT_PRIMARY),
+                                                        .color(pal.text),
                                                 )
                                                 .truncate()
                                                 .sense(egui::Sense::click()),
@@ -594,6 +723,7 @@ pub fn draw_compact_main_snapshot(
                                                     if draw_collapse_chevron_button(
                                                         ui,
                                                         ctrl.show_live_input,
+                                                        &pal,
                                                     ) {
                                                         send(EngineCommand::SetDeviceShowLiveInput {
                                                             key: ctrl.key.clone(),
@@ -613,10 +743,10 @@ pub fn draw_compact_main_snapshot(
                                             ctrl.key.pid
                                         ))
                                         .small()
-                                        .color(TEXT_MUTED),
+                                        .color(pal.muted),
                                     );
 
-                                    draw_battery_bar(ui, &ctrl.battery);
+                                    draw_battery_bar(ui, &ctrl.battery, &pal);
 
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = SPACE_SM;
@@ -629,9 +759,9 @@ pub fn draw_compact_main_snapshot(
                                         }
                                         if ctrl.virtual_active {
                                             egui::Frame::none()
-                                                .fill(Color32::from_rgb(18, 28, 40))
+                                                .fill(pal.pill_blue_fill)
                                                 .rounding(Rounding::same(4.0))
-                                                .stroke(Stroke::new(1.0_f32, LOGO_BLUE))
+                                                .stroke(Stroke::new(1.0_f32, pal.accent_line))
                                                 .inner_margin(Margin::symmetric(SPACE_SM, 2.0))
                                                 .show(ui, |ui| {
                                                     ui.label(
@@ -640,12 +770,12 @@ pub fn draw_compact_main_snapshot(
                                                             ctrl.target_kind.label()
                                                         ))
                                                         .small()
-                                                        .color(TEXT_PRIMARY),
+                                                        .color(pal.text),
                                                     );
                                                 });
                                         }
                                         let cloak_dot =
-                                            if ctrl.cloaked { LOGO_BLUE } else { TEXT_MUTED };
+                                            if ctrl.cloaked { LOGO_BLUE } else { pal.muted };
                                         draw_status_dot(ui, cloak_dot);
                                         ui.label(
                                             RichText::new(if ctrl.cloaked {
@@ -655,9 +785,9 @@ pub fn draw_compact_main_snapshot(
                                             })
                                             .small()
                                             .color(if ctrl.cloaked {
-                                                TEXT_PRIMARY
+                                                pal.text
                                             } else {
-                                                TEXT_MUTED
+                                                pal.muted
                                             }),
                                         );
                                     });
@@ -667,13 +797,13 @@ pub fn draw_compact_main_snapshot(
                                         ui.spacing_mut().button_padding =
                                             Vec2::new(SPACE_SM, SPACE_XS);
                                         ui.label(
-                                            RichText::new("Profile:").small().color(TEXT_MUTED),
+                                            RichText::new("Profile:").small().color(pal.muted),
                                         );
                                         let edit_text_w = ui.fonts(|f| {
                                             f.layout_no_wrap(
                                                 "Edit Profile".to_owned(),
                                                 TextStyle::Small.resolve(ui.style()),
-                                                TEXT_PRIMARY,
+                                                pal.text,
                                             )
                                             .size()
                                             .x
@@ -690,7 +820,7 @@ pub fn draw_compact_main_snapshot(
                                         .selected_text(
                                             RichText::new(&ctrl.profile_name)
                                                 .small()
-                                                .color(TEXT_PRIMARY),
+                                                .color(pal.text),
                                         )
                                         .show_ui(ui, |ui| {
                                             for p in &snap.config.profiles {
@@ -713,11 +843,11 @@ pub fn draw_compact_main_snapshot(
                                         });
 
                                         let edit_btn = egui::Button::new(
-                                            RichText::new("Edit Profile").small().color(TEXT_PRIMARY),
+                                            RichText::new("Edit Profile").small().color(pal.text),
                                         )
                                         .min_size(Vec2::new(edit_btn_w, 0.0))
-                                        .fill(Color32::from_rgb(18, 28, 40))
-                                        .stroke(Stroke::new(1.0_f32, LOGO_BLUE))
+                                        .fill(pal.pill_blue_fill)
+                                        .stroke(Stroke::new(1.0_f32, pal.accent_line))
                                         .rounding(Rounding::same(6.0));
                                         if ui.add(edit_btn).clicked() {
                                             state.selected_controller =
@@ -743,6 +873,7 @@ pub fn draw_compact_main_snapshot(
                                                 ctrl.present_buttons_mask,
                                                 &ctrl.physical_state,
                                                 card_inner_w,
+                                                &pal,
                                             );
                                         });
                                         let lr = live_resp.response.rect;
@@ -793,6 +924,13 @@ pub fn draw_profile_editor_snapshot(
     snap: &EngineSnapshot,
     mut send: impl FnMut(EngineCommand),
 ) {
+    let mode = snap.config.theme_mode;
+    if state.applied_theme != Some(mode) {
+        apply_theme_visuals(ctx, mode);
+        state.applied_theme = Some(mode);
+    }
+    let pal = ThemePalette::for_mode(mode);
+
     if state.selected_controller.is_none() {
         state.selected_controller = snap.controllers.first().map(|c| c.canonical_id.clone());
     }
@@ -834,13 +972,13 @@ pub fn draw_profile_editor_snapshot(
         .exact_height(46.0)
         .frame(
             egui::Frame::none()
-                .fill(PANEL_SURFACE)
+                .fill(pal.panel)
                 .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = SPACE_SM;
-                ui.label(RichText::new("Editing Profile:").color(TEXT_MUTED));
+                ui.label(RichText::new("Editing Profile:").color(pal.muted));
                 let cur_id = state
                     .editing_profile_id
                     .clone()
@@ -852,7 +990,7 @@ pub fn draw_profile_editor_snapshot(
                     .unwrap_or("Select");
                 egui::ComboBox::from_id_salt("editor_profile_selector")
                     .width(230.0)
-                    .selected_text(RichText::new(cur_name).color(TEXT_PRIMARY))
+                    .selected_text(RichText::new(cur_name).color(pal.text))
                     .show_ui(ui, |ui| {
                         for p in &snap.config.profiles {
                             if ui.selectable_label(p.id == cur_id, &p.name).clicked() {
@@ -893,10 +1031,10 @@ pub fn draw_profile_editor_snapshot(
                         } else {
                             "Apply & Save"
                         };
-                        let accent = if state.draft_dirty { LOGO_PINK } else { LOGO_BLUE };
+                        let accent = if state.draft_dirty { LOGO_PINK } else { pal.accent_line };
                         let save_btn =
-                            egui::Button::new(RichText::new(btn_text).strong().color(TEXT_PRIMARY))
-                                .fill(Color32::from_rgb(18, 28, 40))
+                            egui::Button::new(RichText::new(btn_text).strong().color(pal.text))
+                                .fill(if state.draft_dirty { pal.pill_pink_fill } else { pal.pill_blue_fill })
                                 .stroke(Stroke::new(1.0_f32, accent))
                                 .rounding(Rounding::same(6.0));
                         if ui.add(save_btn).clicked() {
@@ -910,19 +1048,19 @@ pub fn draw_profile_editor_snapshot(
             let bot_y = ui.max_rect().bottom() + SPACE_SM;
             ui.painter().line_segment(
                 [Pos2::new(sr.left(), bot_y), Pos2::new(sr.right(), bot_y)],
-                Stroke::new(1.0_f32, SUBTLE_BORDER),
+                Stroke::new(1.0_f32, pal.border),
             );
         });
 
     egui::CentralPanel::default()
         .frame(
             egui::Frame::none()
-                .fill(BG_NEAR_BLACK)
+                .fill(pal.bg)
                 .inner_margin(Margin::same(SPACE_MD)),
         )
         .show(ctx, |ui| {
             let Some(prof) = state.draft_profile.as_mut() else {
-                ui.label(RichText::new("Select a profile to edit.").color(TEXT_MUTED));
+                ui.label(RichText::new("Select a profile to edit.").color(pal.muted));
                 return;
             };
 
@@ -936,9 +1074,9 @@ pub fn draw_profile_editor_snapshot(
 
                 // Left Column: Compact Settings + Full x360ce-style Controller Diagram + Selected Input Bar
                 egui::Frame::none()
-                    .fill(PANEL_SURFACE)
+                    .fill(pal.panel)
                     .rounding(CARD_ROUNDING)
-                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
                     .inner_margin(Margin::same(SPACE_MD))
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
@@ -950,7 +1088,7 @@ pub fn draw_profile_editor_snapshot(
                             .num_columns(2)
                             .spacing([SPACE_MD, SPACE_XS + 2.0])
                             .show(ui, |ui| {
-                                ui.label(RichText::new("Profile Name:").small().color(TEXT_MUTED));
+                                ui.label(RichText::new("Profile Name:").small().color(pal.muted));
                                 ui.horizontal(|ui| {
                                     if ui
                                         .add(egui::TextEdit::singleline(&mut prof.name).desired_width(210.0))
@@ -959,7 +1097,7 @@ pub fn draw_profile_editor_snapshot(
                                         state.draft_dirty = true;
                                     }
                                     ui.add_space(SPACE_SM);
-                                    ui.label(RichText::new("Layout:").small().color(TEXT_MUTED));
+                                    ui.label(RichText::new("Layout:").small().color(pal.muted));
                                     for (fam, lbl) in [
                                         (ControllerFamily::Xbox, "Xbox"),
                                         (ControllerFamily::Sony, "PS"),
@@ -973,7 +1111,7 @@ pub fn draw_profile_editor_snapshot(
                                 });
                                 ui.end_row();
 
-                                ui.label(RichText::new("Virtual Output:").small().color(TEXT_MUTED));
+                                ui.label(RichText::new("Virtual Output:").small().color(pal.muted));
                                 ui.horizontal(|ui| {
                                     for (kind, text) in [
                                         (VirtualTargetKind::Xbox360, "Xbox 360"),
@@ -985,7 +1123,7 @@ pub fn draw_profile_editor_snapshot(
                                             ui.painter().rect_stroke(
                                                 r.rect.expand(2.0),
                                                 Rounding::same(4.0),
-                                                Stroke::new(1.0_f32, LOGO_BLUE),
+                                                Stroke::new(1.0_f32, pal.accent_line),
                                             );
                                         }
                                         if r.changed() {
@@ -1008,7 +1146,7 @@ pub fn draw_profile_editor_snapshot(
                                 });
                                 ui.end_row();
 
-                                ui.label(RichText::new("Options:").small().color(TEXT_MUTED));
+                                ui.label(RichText::new("Options:").small().color(pal.muted));
                                 ui.horizontal(|ui| {
                                     if ui
                                         .checkbox(&mut prof.swap_ab_xy, "Swap A/B & X/Y")
@@ -1040,9 +1178,9 @@ pub fn draw_profile_editor_snapshot(
                                 });
                                 ui.end_row();
 
-                                ui.label(RichText::new("Stick Deadzone:").small().color(TEXT_MUTED));
+                                ui.label(RichText::new("Stick Deadzone:").small().color(pal.muted));
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("L").small().color(TEXT_MUTED));
+                                    ui.label(RichText::new("L").small().color(pal.muted));
                                     let mut l_pct = (prof.left_deadzone * 100.0).round();
                                     if ui
                                         .add(egui::Slider::new(&mut l_pct, 0.0..=50.0).suffix("%"))
@@ -1051,7 +1189,7 @@ pub fn draw_profile_editor_snapshot(
                                         prof.left_deadzone = l_pct / 100.0;
                                         state.draft_dirty = true;
                                     }
-                                    ui.label(RichText::new("R").small().color(TEXT_MUTED));
+                                    ui.label(RichText::new("R").small().color(pal.muted));
                                     let mut r_pct = (prof.right_deadzone * 100.0).round();
                                     if ui
                                         .add(egui::Slider::new(&mut r_pct, 0.0..=50.0).suffix("%"))
@@ -1071,6 +1209,7 @@ pub fn draw_profile_editor_snapshot(
                             prof,
                             phys_ref,
                             &mut state.selected_diagram_button,
+                            &pal,
                         );
                         state.last_dynamic_rect_editor = Some(diag_rect.expand(4.0));
 
@@ -1083,20 +1222,21 @@ pub fn draw_profile_editor_snapshot(
                             ui.label(
                                 RichText::new("Selected Input:")
                                     .small()
-                                    .color(TEXT_MUTED),
+                                    .color(pal.muted),
                             );
                             ui.label(
                                 RichText::new(sel_btn.family_label(prof.family))
                                     .strong()
-                                    .color(TEXT_PRIMARY),
+                                    .color(pal.text),
                             );
-                            ui.label(RichText::new("->").color(TEXT_MUTED));
+                            ui.label(RichText::new("->").color(pal.muted));
                             draw_remap_combobox(
                                 ui,
                                 prof,
                                 sel_btn,
                                 "selected_diagram_remap",
                                 180.0,
+                                &pal,
                                 &mut state.draft_dirty,
                             );
                         });
@@ -1105,9 +1245,9 @@ pub fn draw_profile_editor_snapshot(
 
                 // Right Column: Synchronized Text Mapping List (exact same mapping data in text form)
                 egui::Frame::none()
-                    .fill(PANEL_SURFACE)
+                    .fill(pal.panel)
                     .rounding(CARD_ROUNDING)
-                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .stroke(Stroke::new(1.0_f32, pal.border))
                     .inner_margin(Margin::same(SPACE_MD))
                     .show(ui, |ui| {
                         ui.vertical(|ui| {
@@ -1117,7 +1257,7 @@ pub fn draw_profile_editor_snapshot(
 
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("Input Mappings").strong().color(TEXT_PRIMARY),
+                                RichText::new("Input Mappings").strong().color(pal.text),
                             );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -1131,7 +1271,7 @@ pub fn draw_profile_editor_snapshot(
                         });
 
                         let div = ui.min_rect();
-                        draw_aligned_divider(ui, div.left(), div.right());
+                        draw_aligned_divider(ui, div.left(), div.right(), &pal);
 
                         let present_mask = live_ctrl
                             .as_ref()
@@ -1146,16 +1286,16 @@ pub fn draw_profile_editor_snapshot(
                                     (c.physical_state.buttons_mask & src.bit()) != 0
                                 });
                                 let row_fill = if is_sel {
-                                    Color32::from_rgb(20, 30, 44)
+                                    pal.row_selected_fill
                                 } else {
-                                    BG_NEAR_BLACK
+                                    pal.bg
                                 };
                                 let row_stroke = if is_phys {
                                     Stroke::new(1.0_f32, LOGO_PINK)
                                 } else if is_sel {
-                                    Stroke::new(1.0_f32, LOGO_BLUE)
+                                    Stroke::new(1.0_f32, pal.accent_line)
                                 } else {
-                                    Stroke::new(1.0_f32, SUBTLE_BORDER)
+                                    Stroke::new(1.0_f32, pal.border)
                                 };
 
                                 egui::Frame::none()
@@ -1174,7 +1314,7 @@ pub fn draw_profile_editor_snapshot(
                                             } else if prof.button_remap.contains_key(&src) {
                                                 LOGO_LAVENDER
                                             } else {
-                                                SUBTLE_BORDER
+                                                pal.border
                                             };
                                             draw_status_dot(ui, dot_col);
                                             let lbl_resp = ui.add(
@@ -1182,9 +1322,9 @@ pub fn draw_profile_editor_snapshot(
                                                     RichText::new(src.family_label(prof.family))
                                                         .small()
                                                         .color(if is_sel || is_phys {
-                                                            TEXT_PRIMARY
+                                                            pal.text
                                                         } else {
-                                                            TEXT_MUTED
+                                                            pal.muted
                                                         }),
                                                 )
                                                 .sense(egui::Sense::click()),
@@ -1201,6 +1341,7 @@ pub fn draw_profile_editor_snapshot(
                                                         src,
                                                         ("text_remap", src),
                                                         148.0,
+                                                        &pal,
                                                         &mut state.draft_dirty,
                                                     );
                                                 },
@@ -1222,6 +1363,7 @@ fn draw_remap_combobox(
     src: LogicalButton,
     salt: impl std::hash::Hash,
     width: f32,
+    pal: &ThemePalette,
     dirty: &mut bool,
 ) {
     let current = prof.button_remap.get(&src).copied();
@@ -1232,7 +1374,7 @@ fn draw_remap_combobox(
     };
     egui::ComboBox::from_id_salt(salt)
         .width(width)
-        .selected_text(RichText::new(label).small().color(TEXT_PRIMARY))
+        .selected_text(RichText::new(label).small().color(pal.text))
         .show_ui(ui, |ui| {
             if ui
                 .selectable_label(current.is_none(), "Default (Pass)")
@@ -1263,7 +1405,7 @@ fn draw_remap_combobox(
         });
 }
 
-fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
+fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot, pal: &ThemePalette) {
     ui.spacing_mut().item_spacing.x = SPACE_SM;
     let ds = &snap.driver_status;
     draw_status_dot(ui, if ds.vigem_installed { LOGO_BLUE } else { LOGO_PINK });
@@ -1274,7 +1416,7 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
             "ViGEmBus: Missing"
         })
         .small()
-        .color(TEXT_PRIMARY),
+        .color(pal.text),
     );
     ui.separator();
 
@@ -1286,7 +1428,7 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
         ("HidHide: Locked", LOGO_PINK)
     };
     draw_status_dot(ui, hh_dot);
-    ui.label(RichText::new(hh_text).small().color(TEXT_PRIMARY));
+    ui.label(RichText::new(hh_text).small().color(pal.text));
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let (ws, priv_b) = query_process_memory_bytes();
@@ -1295,7 +1437,7 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
         ui.label(
             RichText::new(format!("RAM: {ws_mb:.1} / {priv_mb:.1} MB"))
                 .small()
-                .color(TEXT_MUTED),
+                .color(pal.muted),
         );
     });
 }
@@ -1304,11 +1446,12 @@ fn draw_status_bar(
     ui: &mut egui::Ui,
     snap: &EngineSnapshot,
     has_driver_alert: bool,
+    pal: &ThemePalette,
     send: &mut impl FnMut(EngineCommand),
 ) {
     let ds = &snap.driver_status;
     if !has_driver_alert {
-        ui.horizontal_centered(|ui| draw_status_bar_row(ui, snap));
+        ui.horizontal_centered(|ui| draw_status_bar_row(ui, snap, pal));
         return;
     }
 
@@ -1321,15 +1464,15 @@ fn draw_status_bar(
                 ui.label(
                     RichText::new("Required drivers missing")
                         .small()
-                        .color(TEXT_MUTED),
+                        .color(pal.muted),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let install_btn = egui::Button::new(
                         RichText::new("Install Missing Drivers")
                             .small()
-                            .color(TEXT_PRIMARY),
+                            .color(pal.text),
                     )
-                    .fill(Color32::from_rgb(38, 22, 34))
+                    .fill(pal.pill_pink_fill)
                     .stroke(Stroke::new(1.0_f32, LOGO_PINK))
                     .rounding(Rounding::same(6.0));
                     if ui.add(install_btn).clicked() {
@@ -1341,16 +1484,16 @@ fn draw_status_bar(
                 ui.label(
                     RichText::new("Reboot recommended to finish driver setup")
                         .small()
-                        .color(TEXT_MUTED),
+                        .color(pal.muted),
                 );
             } else if let Some(err) = &ds.hidhide_error {
                 draw_status_dot(ui, LOGO_PINK);
                 ui.add(
-                    egui::Label::new(RichText::new(err).small().color(TEXT_MUTED)).truncate(),
+                    egui::Label::new(RichText::new(err).small().color(pal.muted)).truncate(),
                 );
             }
         });
-        ui.horizontal(|ui| draw_status_bar_row(ui, snap));
+        ui.horizontal(|ui| draw_status_bar_row(ui, snap, pal));
     });
 }
 
@@ -1423,9 +1566,10 @@ fn draw_card_live_status(
     present_mask: u32,
     phys: &PhysicalSnapshot,
     card_inner_w: f32,
+    pal: &ThemePalette,
 ) {
     let div_left = ui.cursor().left();
-    draw_aligned_divider(ui, div_left, div_left + card_inner_w);
+    draw_aligned_divider(ui, div_left, div_left + card_inner_w, pal);
 
     let (lt_lbl, rt_lbl) = match family {
         ControllerFamily::Sony => ("L2", "R2"),
@@ -1440,18 +1584,20 @@ fn draw_card_live_status(
             "L",
             normalize_stick_axis(phys.left_x),
             normalize_stick_axis(phys.left_y),
+            pal,
         );
         draw_mini_stick_pad(
             ui,
             "R",
             normalize_stick_axis(phys.right_x),
             normalize_stick_axis(phys.right_y),
+            pal,
         );
         ui.vertical(|ui| {
             ui.add_space(SPACE_XS);
-            draw_mini_trigger_row(ui, lt_lbl, normalize_trigger_axis(phys.left_trigger));
+            draw_mini_trigger_row(ui, lt_lbl, normalize_trigger_axis(phys.left_trigger), pal);
             ui.add_space(SPACE_XS);
-            draw_mini_trigger_row(ui, rt_lbl, normalize_trigger_axis(phys.right_trigger));
+            draw_mini_trigger_row(ui, rt_lbl, normalize_trigger_axis(phys.right_trigger), pal);
         });
     });
 
@@ -1459,14 +1605,14 @@ fn draw_card_live_status(
         ui.spacing_mut().item_spacing.x = SPACE_XS;
         for btn in CARD_STANDARD_ROW1 {
             let pressed = (phys.buttons_mask & btn.bit()) != 0;
-            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0);
+            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0, pal);
         }
     });
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS;
         for btn in CARD_STANDARD_ROW2 {
             let pressed = (phys.buttons_mask & btn.bit()) != 0;
-            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0);
+            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0, pal);
         }
     });
 
@@ -1476,41 +1622,41 @@ fn draw_card_live_status(
             ui.spacing_mut().item_spacing.x = SPACE_XS;
             for &btn in chunk {
                 let pressed = (phys.buttons_mask & btn.bit()) != 0;
-                draw_mini_button_pill(ui, btn.family_chip(family), pressed, 36.0);
+                draw_mini_button_pill(ui, btn.family_chip(family), pressed, 36.0, pal);
             }
         });
     }
 }
 
-fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
+fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32, pal: &ThemePalette) {
     let size = 44.0_f32;
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
     let p = ui.painter();
     let center = rect.center();
     let radius = 19.0_f32;
 
-    p.circle_filled(center, radius, BG_NEAR_BLACK);
-    p.circle_stroke(center, radius, Stroke::new(1.0_f32, SUBTLE_BORDER));
+    p.circle_filled(center, radius, pal.bg);
+    p.circle_stroke(center, radius, Stroke::new(1.0_f32, pal.border));
     p.line_segment(
         [
             Pos2::new(center.x - radius + 2.0, center.y),
             Pos2::new(center.x + radius - 2.0, center.y),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
+        Stroke::new(1.0_f32, pal.crosshair),
     );
     p.line_segment(
         [
             Pos2::new(center.x, center.y - radius + 2.0),
             Pos2::new(center.x, center.y + radius - 2.0),
         ],
-        Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
+        Stroke::new(1.0_f32, pal.crosshair),
     );
     p.text(
         rect.min + Vec2::new(2.0, 0.0),
         Align2::LEFT_TOP,
         tag,
         FontId::new(9.5, FontFamily::Proportional),
-        TEXT_MUTED,
+        pal.muted,
     );
 
     let mag = (x * x + y * y).sqrt();
@@ -1532,18 +1678,18 @@ fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
     }
 }
 
-fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
+fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32, pal: &ThemePalette) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SPACE_XS + 2.0;
         ui.label(
             RichText::new(label)
                 .font(FontId::new(10.5, FontFamily::Proportional))
-                .color(TEXT_MUTED),
+                .color(pal.muted),
         );
         let (rect, _) = ui.allocate_exact_size(Vec2::new(112.0, 7.0), egui::Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
-        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
+        p.rect_filled(rect, Rounding::same(3.5), pal.bg);
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, pal.border));
         let u = frac.clamp(0.0, 1.0);
         if u > 0.01 {
             let inner = rect.shrink(1.0);
@@ -1557,12 +1703,18 @@ fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
         ui.label(
             RichText::new(format!("{:.0}%", u * 100.0))
                 .font(FontId::new(10.5, FontFamily::Proportional))
-                .color(if u > 0.01 { TEXT_PRIMARY } else { TEXT_MUTED }),
+                .color(if u > 0.01 { pal.text } else { pal.muted }),
         );
     });
 }
 
-fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool, width: f32) {
+fn draw_mini_button_pill(
+    ui: &mut egui::Ui,
+    label: &str,
+    pressed: bool,
+    width: f32,
+    pal: &ThemePalette,
+) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), egui::Sense::hover());
     let p = ui.painter();
     if pressed {
@@ -1574,18 +1726,18 @@ fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool, width: f
                 Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 80),
             ),
         );
-        p.rect_filled(rect, Rounding::same(3.5), Color32::from_rgb(38, 22, 34));
+        p.rect_filled(rect, Rounding::same(3.5), pal.pill_pink_fill);
         p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.5_f32, LOGO_PINK));
     } else {
-        p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
-        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
+        p.rect_filled(rect, Rounding::same(3.5), pal.bg);
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, pal.border));
     }
     p.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
         FontId::new(10.0, FontFamily::Proportional),
-        if pressed { TEXT_PRIMARY } else { TEXT_MUTED },
+        if pressed { pal.text } else { pal.muted },
     );
 }
 
@@ -1999,5 +2151,105 @@ mod tests {
 
         assert!(p1.y < p2.y && p2.y < p3.y, "cards must stack strictly vertically: {p1:?} {p2:?} {p3:?}");
         assert!((p1.x - p2.x).abs() < 12.0 && p2.x < 250.0, "cards must share single column");
+    }
+
+    #[test]
+    fn theme_toggle_button_left_of_refresh_emits_set_theme_mode() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        snap.config.theme_mode = ThemeMode::Dark;
+        let mut ui_state = AppUiState::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(396.0, 601.0)));
+
+        let out_dark = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(0.05),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+        let refresh_center = find_text_center(&out_dark.shapes, "Refresh").unwrap();
+        let toggle_center = Pos2::new(refresh_center.x - 42.0, refresh_center.y);
+
+        let mut emitted = Vec::new();
+        for (i, pressed) in [(1, true), (2, false)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(0.05 * (i + 1) as f64),
+                    events: vec![
+                        egui::Event::PointerMoved(toggle_center),
+                        egui::Event::PointerButton {
+                            pos: toggle_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd);
+                    });
+                },
+            );
+        }
+        assert!(
+            emitted
+                .iter()
+                .any(|c| matches!(c, EngineCommand::SetThemeMode(ThemeMode::Light))),
+            "expected SetThemeMode(Light) from dark mode toggle, got {emitted:?}"
+        );
+
+        // Switching to Light updates egui visuals background & clicking toggles back to Dark.
+        snap.config.theme_mode = ThemeMode::Light;
+        emitted.clear();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(0.25),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+        assert!(!ctx.style().visuals.dark_mode);
+        for (i, pressed) in [(6, true), (7, false)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(0.05 * i as f64),
+                    events: vec![
+                        egui::Event::PointerMoved(toggle_center),
+                        egui::Event::PointerButton {
+                            pos: toggle_center,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd);
+                    });
+                },
+            );
+        }
+        assert!(
+            emitted
+                .iter()
+                .any(|c| matches!(c, EngineCommand::SetThemeMode(ThemeMode::Dark))),
+            "expected SetThemeMode(Dark) from light mode toggle, got {emitted:?}"
+        );
     }
 }

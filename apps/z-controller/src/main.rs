@@ -14,7 +14,7 @@ use serde::Serialize;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use z_core::battery::{BatteryReading, BatteryStatus};
 use z_core::model::{ControllerFamily, HardwareKey, LogicalButton, Transport, VirtualTargetKind};
-use z_core::profile::{AppConfig, Profile};
+use z_core::profile::{AppConfig, Profile, ThemeMode};
 use z_platform_windows::drivers::query_process_memory_bytes;
 use z_sdl3::{SdlGamepadAxis, SdlGamepadButton, SdlVirtualGamepad};
 
@@ -46,6 +46,7 @@ fn main() {
     let mut preview_cards = false;
     let mut preview_one_collapsed = false;
     let mut preview_missing_drivers = false;
+    let mut preview_theme_mode: Option<ThemeMode> = None;
     let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
     let mut show_editor_profile: Option<String> = None;
@@ -82,6 +83,16 @@ fn main() {
             "--preview-cards" => preview_cards = true,
             "--preview-one-collapsed" => preview_one_collapsed = true,
             "--preview-missing-drivers" => preview_missing_drivers = true,
+            "--preview-theme" => {
+                if i + 1 < args.len() {
+                    preview_theme_mode = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "light" => Some(ThemeMode::Light),
+                        "dark" => Some(ThemeMode::Dark),
+                        _ => None,
+                    };
+                    i += 1;
+                }
+            }
             "--live-demo-pad" => live_demo_pad = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
@@ -257,6 +268,7 @@ fn main() {
         show_editor_profile,
         preview,
         preview_driver_status,
+        preview_theme_mode,
         tray_smoke_ms,
         test_dpi,
     ) {

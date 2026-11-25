@@ -32,6 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_THICKFRAME,
 };
 use z_core::backend::DriverStatus;
+use z_core::profile::ThemeMode;
 
 use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
@@ -51,7 +52,8 @@ const WM_NCHITTEST: u32 = 0x0084;
 const WM_SIZING: u32 = 0x0214;
 const CMD_OPEN: usize = 1001;
 const CMD_QUIT: usize = 1002;
-const CLEAR_BG_RGB: u32 = 0x000A_0A10;
+const CLEAR_BG_DARK_RGB: u32 = 0x000A_0A10;
+const CLEAR_BG_LIGHT_RGB: u32 = 0x00EE_F4FA;
 
 // Logical client dimensions at 96 DPI (exact same UI geometry at 100%, scaled cleanly per monitor DPI).
 const COMPACT_CLIENT_LOGICAL_W: i32 = 396;
@@ -266,6 +268,7 @@ struct AppShared {
     ui_state: Mutex<AppUiState>,
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     preview_driver_status: Option<DriverStatus>,
+    preview_theme_mode: Option<ThemeMode>,
     start_time: Instant,
     hinstance: HINSTANCE,
     large_icon: HICON,
@@ -278,7 +281,7 @@ struct WindowHostState {
     shared: Arc<AppShared>,
     role: WindowRole,
     ui_session: Option<(egui::Context, SoftwarePainter)>,
-    dark_titlebar_applied: bool,
+    applied_titlebar_theme: Option<ThemeMode>,
     events: Vec<Event>,
     width: usize,
     height: usize,
@@ -316,12 +319,14 @@ fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_tray_app(
     engine: EngineHandle,
     open_immediately: bool,
     initial_editor_profile: Option<String>,
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     preview_driver_status: Option<DriverStatus>,
+    preview_theme_mode: Option<ThemeMode>,
     smoke_exit_after_ms: Option<u64>,
     test_dpi: Option<u32>,
 ) -> Result<(), String> {
@@ -354,6 +359,7 @@ pub fn run_tray_app(
         ui_state: Mutex::new(AppUiState::default()),
         preview_controllers,
         preview_driver_status,
+        preview_theme_mode,
         start_time: Instant::now(),
         hinstance,
         large_icon,
@@ -371,11 +377,23 @@ pub fn run_tray_app(
         init_dpi,
     );
 
+    let init_theme = shared
+        .preview_theme_mode
+        .unwrap_or_else(|| {
+            shared
+                .engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot()
+                .config
+                .theme_mode
+        });
+
     let main_state = Box::new(WindowHostState {
         shared: Arc::clone(&shared),
         role: WindowRole::Main,
         ui_session: None,
-        dark_titlebar_applied: show_main,
+        applied_titlebar_theme: if show_main { Some(init_theme) } else { None },
         events: Vec::new(),
         width: (COMPACT_CLIENT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
         height: (COMPACT_CLIENT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
@@ -437,7 +455,7 @@ pub fn run_tray_app(
     add_tray_icon(hwnd, small_icon);
 
     if show_main {
-        apply_dark_titlebar(hwnd);
+        apply_titlebar_theme(hwnd, init_theme);
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
@@ -600,7 +618,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             shared: Arc::clone(shared),
             role: WindowRole::Editor,
             ui_session: None,
-            dark_titlebar_applied: true,
+            applied_titlebar_theme: None,
             events: Vec::new(),
             width: (EDITOR_CLIENT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
             height: (EDITOR_CLIENT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
@@ -635,7 +653,16 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             unsafe { drop(Box::from_raw(ed_ptr)) };
             return;
         }
-        apply_dark_titlebar(created);
+        let ed_theme = shared.preview_theme_mode.unwrap_or_else(|| {
+            shared
+                .engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot()
+                .config
+                .theme_mode
+        });
+        apply_titlebar_theme(created, ed_theme);
         let (actual_dpi, cw, ch) = sync_window_dpi_and_bounds(
             created,
             EDITOR_WINDOW_STYLE,
@@ -647,6 +674,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             st.pixels_per_point = dpi_to_ppp(actual_dpi);
             st.width = cw;
             st.height = ch;
+            st.applied_titlebar_theme = Some(ed_theme);
         }
         *ed_hwnd_guard = created as usize;
         created
@@ -656,9 +684,18 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
     drop(ed_hwnd_guard);
 
     if let Some(st) = unsafe { host_state_mut(ed_hwnd) } {
-        if !st.dark_titlebar_applied {
-            apply_dark_titlebar(ed_hwnd);
-            st.dark_titlebar_applied = true;
+        let ed_theme = shared.preview_theme_mode.unwrap_or_else(|| {
+            shared
+                .engine
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .snapshot()
+                .config
+                .theme_mode
+        });
+        if st.applied_titlebar_theme != Some(ed_theme) {
+            apply_titlebar_theme(ed_hwnd, ed_theme);
+            st.applied_titlebar_theme = Some(ed_theme);
         }
         let main_hwnd_val = *shared.main_hwnd.lock().unwrap_or_else(|e| e.into_inner()) as HWND;
         let target_dpi = if !main_hwnd_val.is_null() {
@@ -717,7 +754,7 @@ unsafe fn host_state_mut<'a>(hwnd: HWND) -> Option<&'a mut WindowHostState> {
     }
 }
 
-fn apply_dark_titlebar(hwnd: HWND) {
+fn apply_titlebar_theme(hwnd: HWND, mode: ThemeMode) {
     let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
     let module = unsafe { LoadLibraryW(dll.as_ptr()) };
     if module.is_null() {
@@ -727,7 +764,10 @@ fn apply_dark_titlebar(hwnd: HWND) {
         unsafe extern "system" fn(HWND, u32, *const std::ffi::c_void, u32) -> i32;
     if let Some(proc) = unsafe { GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr()) } {
         let set_attr: DwmSetAttrFn = unsafe { std::mem::transmute_copy(&proc) };
-        let dark_mode: i32 = 1;
+        let dark_mode: i32 = match mode {
+            ThemeMode::Dark => 1,
+            ThemeMode::Light => 0,
+        };
         unsafe {
             set_attr(
                 hwnd,
@@ -736,7 +776,11 @@ fn apply_dark_titlebar(hwnd: HWND) {
                 size_of::<i32>() as u32,
             );
         }
-        let caption_color: u32 = 0x0010_0A0A;
+        // DWMWA_CAPTION_COLOR uses COLORREF (0x00BBGGRR).
+        let caption_color: u32 = match mode {
+            ThemeMode::Dark => 0x0010_0A0A,  // #0A0A10
+            ThemeMode::Light => 0x00FA_F4EE, // #EEF4FA
+        };
         unsafe {
             set_attr(
                 hwnd,
@@ -1044,6 +1088,7 @@ unsafe extern "system" fn wnd_proc(
                 let base_snap = eng.snapshot();
                 let effective_snap = if shared.preview_controllers.is_some()
                     || shared.preview_driver_status.is_some()
+                    || shared.preview_theme_mode.is_some()
                 {
                     let mut cloned: EngineSnapshot = (*base_snap).clone();
                     if let Some(preview) = shared.preview_controllers.as_ref() {
@@ -1052,11 +1097,19 @@ unsafe extern "system" fn wnd_proc(
                     if let Some(preview_ds) = shared.preview_driver_status.as_ref() {
                         cloned.driver_status = preview_ds.clone();
                     }
+                    if let Some(tm) = shared.preview_theme_mode {
+                        cloned.config.theme_mode = tm;
+                    }
                     Some(cloned)
                 } else {
                     None
                 };
                 let snap_ref: &EngineSnapshot = effective_snap.as_ref().unwrap_or(&base_snap);
+                let active_theme = snap_ref.config.theme_mode;
+                if st.applied_titlebar_theme != Some(active_theme) {
+                    apply_titlebar_theme(hwnd, active_theme);
+                    st.applied_titlebar_theme = Some(active_theme);
+                }
                 let full_out = egui_ctx.run(raw, |ctx| match role {
                     WindowRole::Main => {
                         actions = draw_compact_main_snapshot(ctx, &mut ui_state, snap_ref, |cmd| {
@@ -1070,6 +1123,10 @@ unsafe extern "system" fn wnd_proc(
                     }
                 });
                 let static_key = static_ui_hash(snap_ref, &ui_state);
+                let clear_bg = match active_theme {
+                    ThemeMode::Dark => CLEAR_BG_DARK_RGB,
+                    ThemeMode::Light => CLEAR_BG_LIGHT_RGB,
+                };
                 if role == WindowRole::Main && !st.in_size_move {
                     if let Some(raw_h) = ui_state.desired_compact_logical_h {
                         let clamped_h = (raw_h.ceil() as i32)
@@ -1119,7 +1176,7 @@ unsafe extern "system" fn wnd_proc(
                     height,
                     render_ppp,
                     &clipped,
-                    CLEAR_BG_RGB,
+                    clear_bg,
                     dirty_px,
                     Some(ps.rcPaint),
                 );
@@ -1372,9 +1429,18 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn show_main_window(hwnd: HWND, st: &mut WindowHostState) {
-    if !st.dark_titlebar_applied {
-        apply_dark_titlebar(hwnd);
-        st.dark_titlebar_applied = true;
+    let theme_mode = st.shared.preview_theme_mode.unwrap_or_else(|| {
+        st.shared
+            .engine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot()
+            .config
+            .theme_mode
+    });
+    if st.applied_titlebar_theme != Some(theme_mode) {
+        apply_titlebar_theme(hwnd, theme_mode);
+        st.applied_titlebar_theme = Some(theme_mode);
     }
     st.visible = true;
     st.followup_paint_budget = 1;

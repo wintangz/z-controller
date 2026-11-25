@@ -106,6 +106,23 @@ impl Profile {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControllerBinding {
     pub profile_id: String,
@@ -120,6 +137,8 @@ pub struct AppConfig {
     #[serde(default = "default_profile_id")]
     pub default_profile_id: String,
     #[serde(default)]
+    pub theme_mode: ThemeMode,
+    #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub bindings: BTreeMap<String, ControllerBinding>,
@@ -133,6 +152,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             default_profile_id: default_profile_id(),
+            theme_mode: ThemeMode::Dark,
             profiles: vec![
                 Profile::builtin_xbox360(),
                 Profile::builtin_dualsense(),
@@ -331,6 +351,29 @@ mod tests {
         let (enabled, prof) = reloaded.profile_for_device(&key);
         assert!(!enabled);
         assert_eq!(prof.id, "switch-pro");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_mode_defaults_to_dark_and_persists_across_restarts() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(cfg.theme_mode, ThemeMode::Dark);
+        assert_eq!(cfg.theme_mode.toggled(), ThemeMode::Light);
+
+        cfg.theme_mode = ThemeMode::Light;
+        let dir = std::env::temp_dir().join(format!("z_ctrl_theme_test_{}", std::process::id()));
+        let file = dir.join("config.toml");
+        cfg.save_atomic(&file).unwrap();
+
+        let reloaded = AppConfig::load_or_default(&file);
+        assert_eq!(reloaded.theme_mode, ThemeMode::Light);
+
+        // Legacy config missing theme_mode loads as Dark.
+        let legacy_toml = "default_profile_id = \"xbox-360\"\n";
+        std::fs::write(&file, legacy_toml).unwrap();
+        let legacy = AppConfig::load_or_default(&file);
+        assert_eq!(legacy.theme_mode, ThemeMode::Dark);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
