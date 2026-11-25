@@ -4,11 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2};
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -25,19 +25,21 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
 };
 
-use crate::engine::{EngineHandle, WM_APP_STATE_CHANGED};
+use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
-use crate::ui::{AppUiState, draw_app_ui};
+use crate::ui::{AppUiState, configure_neon_theme_and_fonts, draw_app_ui, draw_app_ui_snapshot};
 
 const WM_TRAYICON: u32 = 0x8000 + 2;
 const CMD_OPEN: usize = 1001;
 const CMD_QUIT: usize = 1002;
-const CLEAR_BG_RGB: u32 = 0x001B_1E26;
+const CLEAR_BG_RGB: u32 = 0x000A_0A10;
 
 struct WindowState {
     engine: Arc<Mutex<EngineHandle>>,
     ui_session: Option<(egui::Context, SoftwarePainter)>,
     ui_state: AppUiState,
+    preview_controllers: Option<Vec<ControllerSnapshot>>,
+    dark_titlebar_applied: bool,
     events: Vec<Event>,
     start_time: Instant,
     width: usize,
@@ -49,6 +51,7 @@ struct WindowState {
 pub fn run_tray_app(
     engine: EngineHandle,
     open_immediately: bool,
+    preview_controllers: Option<Vec<ControllerSnapshot>>,
     smoke_exit_after_ms: Option<u64>,
 ) -> Result<(), String> {
     let hinstance = unsafe { GetModuleHandleW(null()) } as HINSTANCE;
@@ -79,6 +82,8 @@ pub fn run_tray_app(
         engine: Arc::new(Mutex::new(engine)),
         ui_session: None,
         ui_state: AppUiState::default(),
+        preview_controllers,
+        dark_titlebar_applied: open_immediately,
         events: Vec::new(),
         start_time: Instant::now(),
         width: 960,
@@ -96,8 +101,8 @@ pub fn run_tray_app(
             WS_OVERLAPPEDWINDOW | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
             120,
             100,
-            980,
-            675,
+            1000,
+            695,
             null_mut(),
             null_mut(),
             hinstance,
@@ -119,12 +124,15 @@ pub fn run_tray_app(
     add_tray_icon(hwnd, tray_icon);
 
     if open_immediately {
+        apply_dark_titlebar(hwnd);
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
             SetForegroundWindow(hwnd);
             InvalidateRect(hwnd, null(), 0);
             UpdateWindow(hwnd);
         }
+    } else {
+        z_platform_windows::drivers::trim_process_working_set();
     }
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -161,6 +169,42 @@ pub fn run_tray_app(
         st.engine.lock().unwrap_or_else(|e| e.into_inner()).shutdown();
     }
     Ok(())
+}
+
+fn apply_dark_titlebar(hwnd: HWND) {
+    let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
+    let module = unsafe { LoadLibraryW(dll.as_ptr()) };
+    if module.is_null() {
+        return;
+    }
+    type DwmSetAttrFn =
+        unsafe extern "system" fn(HWND, u32, *const std::ffi::c_void, u32) -> i32;
+    if let Some(proc) = unsafe { GetProcAddress(module, b"DwmSetWindowAttribute\0".as_ptr()) } {
+        let set_attr: DwmSetAttrFn = unsafe { std::mem::transmute_copy(&proc) };
+        let dark_mode: i32 = 1;
+        // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        unsafe {
+            set_attr(
+                hwnd,
+                20,
+                (&dark_mode as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
+        }
+        // DWMWA_CAPTION_COLOR = 35, COLORREF BGR (#0A0A10 -> 0x0010_0A0A)
+        let caption_color: u32 = 0x0010_0A0A;
+        unsafe {
+            set_attr(
+                hwnd,
+                35,
+                (&caption_color as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
+    }
+    unsafe {
+        FreeLibrary(module);
+    }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -213,9 +257,7 @@ unsafe extern "system" fn wnd_proc(
                 let ui_state = &mut st.ui_state;
                 let (egui_ctx, painter) = st.ui_session.get_or_insert_with(|| {
                     let ctx = egui::Context::default();
-                    let mut visuals = egui::Visuals::dark();
-                    visuals.panel_fill = egui::Color32::from_rgb(27, 30, 38);
-                    ctx.set_visuals(visuals);
+                    configure_neon_theme_and_fonts(&ctx);
                     (ctx, SoftwarePainter::new())
                 });
                 let raw = RawInput {
@@ -229,8 +271,20 @@ unsafe extern "system" fn wnd_proc(
                     focused: true,
                     ..Default::default()
                 };
+                let preview_list = st.preview_controllers.as_ref();
                 let full_out = egui_ctx.run(raw, |ctx| {
-                    draw_app_ui(ctx, ui_state, &eng);
+                    if let Some(preview) = preview_list {
+                        let base = eng.snapshot();
+                        let snap = EngineSnapshot {
+                            controllers: preview.clone(),
+                            config: base.config.clone(),
+                            driver_status: base.driver_status.clone(),
+                            last_status_message: base.last_status_message.clone(),
+                        };
+                        draw_app_ui_snapshot(ctx, ui_state, &snap, |cmd| eng.send(cmd));
+                    } else {
+                        draw_app_ui(ctx, ui_state, &eng);
+                    }
                 });
                 drop(eng);
 
@@ -355,6 +409,10 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn show_main_window(hwnd: HWND, st: &mut WindowState) {
+    if !st.dark_titlebar_applied {
+        apply_dark_titlebar(hwnd);
+        st.dark_titlebar_applied = true;
+    }
     st.visible = true;
     st.engine
         .lock()
@@ -427,8 +485,15 @@ unsafe fn create_gamepad_icon() -> HICON {
             let inside = (3..13).contains(&y) && (1..15).contains(&x)
                 && !((y == 3 || y == 12) && (x < 3 || x > 12));
             if inside {
-                let accent = (y == 7 && (x == 4 || x == 5)) || (y == 7 && x == 11) || (y == 8 && x == 10);
-                color[y * SIZE + x] = if accent { 0xFF60_B8FF } else { 0xFF28_3040 };
+                let left_accent = y == 7 && (x == 4 || x == 5);
+                let right_accent = (y == 7 && x == 11) || (y == 8 && x == 10);
+                color[y * SIZE + x] = if left_accent {
+                    0xFFA9_70FF
+                } else if right_accent {
+                    0xFF3D_FF7A
+                } else {
+                    0xFF14_141F
+                };
             }
         }
     }

@@ -9,11 +9,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
+use z_core::battery::{BatteryReading, BatteryStatus};
+use z_core::model::{ControllerFamily, HardwareKey, Transport, VirtualTargetKind};
 use z_core::profile::AppConfig;
 use z_platform_windows::drivers::query_process_memory_bytes;
 use z_sdl3::{SdlGamepadAxis, SdlGamepadButton, SdlVirtualGamepad};
 
-use crate::engine::{ControllerSnapshot, EngineHandle, install_emergency_uncloak_hooks};
+use crate::engine::{
+    ControllerSnapshot, EngineHandle, PhysicalSnapshot, VirtualOutputSnapshot,
+    install_emergency_uncloak_hooks,
+};
 
 #[derive(Serialize)]
 struct SmokeReport {
@@ -34,6 +39,7 @@ fn main() {
     let mut smoke_json_path: Option<PathBuf> = None;
     let mut smoke_hold_ms: u64 = 1200;
     let mut smoke_dual_pad = false;
+    let mut preview_cards = false;
     let mut tray_smoke_ms: Option<u64> = None;
 
     let mut i = 1;
@@ -53,6 +59,7 @@ fn main() {
                 }
             }
             "--smoke-dual-pad" => smoke_dual_pad = true,
+            "--preview-cards" => preview_cards = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
                     tray_smoke_ms = Some(args[i + 1].parse().unwrap_or(4000));
@@ -153,8 +160,67 @@ fn main() {
         open_immediately = true;
     }
 
-    if let Err(err) = tray_win32::run_tray_app(engine, open_immediately, tray_smoke_ms) {
+    let preview = if preview_cards {
+        Some(build_preview_cards())
+    } else {
+        None
+    };
+
+    if let Err(err) = tray_win32::run_tray_app(engine, open_immediately, preview, tray_smoke_ms) {
         eprintln!("z-controller tray error: {err}");
         std::process::exit(1);
     }
+}
+
+fn build_preview_cards() -> Vec<ControllerSnapshot> {
+    vec![
+        ControllerSnapshot {
+            key: HardwareKey::new(0x057E, 0x2009, "NSP98b6b0d12a2c"),
+            canonical_id: "057e:2009:NSP98b6b0d12a2c".to_string(),
+            sdl_id: Some(1),
+            name: "Nintendo Switch Pro Controller".to_string(),
+            family: ControllerFamily::Nintendo,
+            transport: Transport::Bluetooth,
+            connected: true,
+            enabled: true,
+            profile_id: "x360-fifa".to_string(),
+            profile_name: "Xbox 360 Default (FIFA)".to_string(),
+            target_kind: VirtualTargetKind::Xbox360,
+            cloaked: true,
+            virtual_active: true,
+            virtual_serial: Some(1),
+            battery: BatteryReading {
+                percent: Some(86),
+                status: BatteryStatus::OnBattery,
+                source: "sdl3",
+            },
+            physical_state: PhysicalSnapshot::default(),
+            virtual_output: VirtualOutputSnapshot::None,
+            instance_id: None,
+        },
+        ControllerSnapshot {
+            key: HardwareKey::new(0x054C, 0x0CE6, "DS5-USB-02"),
+            canonical_id: "054c:0ce6:DS5-USB-02".to_string(),
+            sdl_id: Some(2),
+            name: "DualSense Wireless Controller".to_string(),
+            family: ControllerFamily::Sony,
+            transport: Transport::Usb,
+            connected: true,
+            enabled: false,
+            profile_id: "ds4-default".to_string(),
+            profile_name: "DualShock 4 Default".to_string(),
+            target_kind: VirtualTargetKind::DualShock4,
+            cloaked: false,
+            virtual_active: false,
+            virtual_serial: None,
+            battery: BatteryReading {
+                percent: Some(18),
+                status: BatteryStatus::OnBattery,
+                source: "sony-hid",
+            },
+            physical_state: PhysicalSnapshot::default(),
+            virtual_output: VirtualOutputSnapshot::None,
+            instance_id: None,
+        },
+    ]
 }
