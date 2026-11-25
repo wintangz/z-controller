@@ -498,6 +498,18 @@ fn decode_image(img: &ImageData) -> (usize, usize, Vec<[u8; 4]>) {
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
+fn edge_pass(w: f32, ex: f32, ey: f32) -> bool {
+    if w > 0.0 {
+        true
+    } else if w < 0.0 {
+        false
+    } else {
+        ey < 0.0 || (ey == 0.0 && ex < 0.0)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
 fn rasterize_triangle(
     fb: &mut [u32],
     fb_w: usize,
@@ -539,6 +551,13 @@ fn rasterize_triangle(
     };
     let inv_area = 1.0 / area;
 
+    let ex0 = (x2 - x1) * sign;
+    let ey0 = (y2 - y1) * sign;
+    let ex1 = (x0 - x2) * sign;
+    let ey1 = (y0 - y2) * sign;
+    let ex2 = (x1 - x0) * sign;
+    let ey2 = (y1 - y0) * sign;
+
     let c0 = v0.color.to_array();
     let c1 = v1.color.to_array();
     let c2 = v2.color.to_array();
@@ -551,16 +570,16 @@ fn rasterize_triangle(
         let row_off = py * fb_w;
         for px in min_x..max_x {
             let fx = px as f32 + 0.5;
-            let w0 = ((x2 - x1) * (fy - y1) - (y2 - y1) * (fx - x1)) * sign;
-            if w0 < -0.001 {
+            let w0 = ex0 * (fy - y1) - ey0 * (fx - x1);
+            if !edge_pass(w0, ex0, ey0) {
                 continue;
             }
-            let w1 = ((x0 - x2) * (fy - y2) - (y0 - y2) * (fx - x2)) * sign;
-            if w1 < -0.001 {
+            let w1 = ex1 * (fy - y2) - ey1 * (fx - x2);
+            if !edge_pass(w1, ex1, ey1) {
                 continue;
             }
-            let w2 = ((x1 - x0) * (fy - y0) - (y1 - y0) * (fx - x0)) * sign;
-            if w2 < -0.001 {
+            let w2 = ex2 * (fy - y0) - ey2 * (fx - x0);
+            if !edge_pass(w2, ex2, ey2) {
                 continue;
             }
 

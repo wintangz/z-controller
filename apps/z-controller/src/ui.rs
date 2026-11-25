@@ -28,6 +28,12 @@ pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 168, 216); // #F7A8D8
 pub const LOGO_PINK_LIGHT: Color32 = Color32::from_rgb(255, 199, 227); // #FFC7E3
 pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(216, 166, 255); // #D8A6FF
 
+// Semantic status colours (FIX 4: status dots, Active/Cloaked indicators, drivers, battery only).
+pub const STATUS_GREEN: Color32 = Color32::from_rgb(40, 214, 108); // #28D66C
+pub const STATUS_RED: Color32 = Color32::from_rgb(240, 68, 88); // #F04458
+
+const HEADER_ROW_H: f32 = 24.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThemePalette {
     pub bg: Color32,
@@ -106,6 +112,7 @@ impl ThemePalette {
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
+#[allow(dead_code)]
 pub const SPACE_LG: f32 = 16.0;
 
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
@@ -262,6 +269,12 @@ pub fn apply_theme_visuals(ctx: &egui::Context, mode: ThemeMode) {
 
     style.visuals = visuals;
     style.animation_time = 0.0;
+    style.spacing.item_spacing = Vec2::new(SPACE_SM, SPACE_SM);
+    style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS);
+    style.spacing.scroll.floating = false;
+    style.spacing.scroll.bar_width = SPACE_SM;
+    style.spacing.scroll.bar_inner_margin = SPACE_SM;
+    style.spacing.scroll.bar_outer_margin = 0.0;
     ctx.set_style(style);
 }
 
@@ -287,7 +300,11 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
     ]);
     style.animation_time = 0.0;
     style.spacing.item_spacing = Vec2::new(SPACE_SM, SPACE_SM);
-    style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS + 1.0);
+    style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS);
+    style.spacing.scroll.floating = false;
+    style.spacing.scroll.bar_width = SPACE_SM;
+    style.spacing.scroll.bar_inner_margin = SPACE_SM;
+    style.spacing.scroll.bar_outer_margin = 0.0;
     ctx.set_style(style);
     apply_theme_visuals(ctx, ThemeMode::Dark);
 }
@@ -295,8 +312,8 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
 #[inline]
 pub fn battery_bar_color(percent: Option<u8>) -> Color32 {
     match percent {
-        Some(p) if p <= 20 => LOGO_PINK,
-        _ => LOGO_BLUE,
+        Some(p) if p <= 20 => STATUS_RED,
+        _ => STATUS_GREEN,
     }
 }
 
@@ -325,7 +342,7 @@ pub fn normalize_trigger_axis(raw: i16) -> f32 {
 
 fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec2)>) {
     let r = radius.clamp(0.0, 0.5 * rect.width().min(rect.height()));
-    const SEGS: usize = 7;
+    const SEGS: usize = 16;
     let corners = [
         (Pos2::new(rect.left() + r, rect.top() + r), PI, 1.5 * PI),
         (Pos2::new(rect.right() - r, rect.top() + r), 1.5 * PI, 2.0 * PI),
@@ -336,53 +353,65 @@ fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec
         for k in 0..=SEGS {
             let theta = a0 + (a1 - a0) * (k as f32 / SEGS as f32);
             let n = Vec2::new(theta.cos(), theta.sin());
-            out.push((center + n * r, n));
+            let p = center + n * r;
+            if let Some(&(prev_p, _)) = out.last() {
+                if (p - prev_p).length_sq() < 1e-5 {
+                    continue;
+                }
+            }
+            out.push((p, n));
+        }
+    }
+    if out.len() >= 2 {
+        if (out[0].0 - out[out.len() - 1].0).length_sq() < 1e-5 {
+            out.pop();
         }
     }
 }
 
-fn paint_gradient_rounded_rect_stroke(
-    painter: &egui::Painter,
-    rect: Rect,
-    rounding: f32,
-    stroke_width: f32,
-    c_start: Color32,
-    c_mid: Color32,
-    c_end: Color32,
-    alpha: u8,
-) {
-    if rect.width() <= 1.0 || rect.height() <= 1.0 || alpha == 0 {
+fn build_rounded_rect_polygon(rect: Rect, radius: f32) -> Vec<Pos2> {
+    let mut ring = Vec::with_capacity(68);
+    push_rounded_rect_perimeter(rect, radius, &mut ring);
+    ring.into_iter().map(|(p, _)| p).collect()
+}
+
+fn paint_active_card_gradient_border(painter: &egui::Painter, rect: Rect, rounding: f32) {
+    if rect.width() <= 4.0 || rect.height() <= 4.0 {
         return;
     }
-    let mut ring = Vec::with_capacity(32);
+    let mut ring = Vec::with_capacity(68);
     push_rounded_rect_perimeter(rect, rounding, &mut ring);
     let n = ring.len();
-    if n < 4 {
+    if n < 8 {
         return;
     }
 
-    let hw = stroke_width * 0.5;
-    let aa = 0.75_f32;
-    let offsets = [-hw - aa, -hw, hw, hw + aa];
+    // Strictly bounded within `rect` (max offset = 0.0):
+    // [inner glow falloff (-4.5 -> -1.6), crisp 1.2pt border (-1.6 -> -0.4), outer AA (-0.4 -> 0.0)].
+    const BANDS: usize = 5;
+    let offsets = [-4.5_f32, -2.0_f32, -1.6_f32, -0.4_f32, 0.0_f32];
+    let alphas = [0_u8, 52_u8, 255_u8, 255_u8, 0_u8];
+
     let w = rect.width().max(1.0);
     let h = rect.height().max(1.0);
 
     let mut mesh = Mesh::default();
-    mesh.vertices.reserve(n * 4);
-    mesh.indices.reserve(n * 18);
+    mesh.vertices.reserve(n * BANDS);
+    mesh.indices.reserve(n * (BANDS - 1) * 6);
 
     for (p, norm) in &ring {
         let t = (((p.x - rect.left()) / w) * 0.65 + ((p.y - rect.top()) / h) * 0.35).clamp(0.0, 1.0);
         let c = if t <= 0.5 {
-            lerp_color(c_start, c_mid, t * 2.0)
+            lerp_color(LOGO_BLUE, LOGO_LAVENDER, t * 2.0)
         } else {
-            lerp_color(c_mid, c_end, (t - 0.5) * 2.0)
+            lerp_color(LOGO_LAVENDER, LOGO_PINK, (t - 0.5) * 2.0)
         };
-        let core = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha);
-        let edge = Color32::TRANSPARENT;
-
-        for (band_idx, &off) in offsets.iter().enumerate() {
-            let color = if band_idx == 1 || band_idx == 2 { core } else { edge };
+        for (&off, &a) in offsets.iter().zip(alphas.iter()) {
+            let color = if a == 0 {
+                Color32::TRANSPARENT
+            } else {
+                Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
+            };
             mesh.vertices.push(Vertex {
                 pos: *p + *norm * off,
                 uv: WHITE_UV,
@@ -391,11 +420,12 @@ fn paint_gradient_rounded_rect_stroke(
         }
     }
 
+    let stride = BANDS as u32;
     for i in 0..n {
         let j = (i + 1) % n;
-        let b0 = (i * 4) as u32;
-        let b1 = (j * 4) as u32;
-        for band in 0..3u32 {
+        let b0 = (i as u32) * stride;
+        let b1 = (j as u32) * stride;
+        for band in 0..(stride - 1) {
             let i0 = b0 + band;
             let i1 = b0 + band + 1;
             let i2 = b1 + band;
@@ -407,36 +437,6 @@ fn paint_gradient_rounded_rect_stroke(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rounding: f32) {
-    // Static layered translucent outer glow (strictly outside card edge) + 1.5px pastel blue -> lavender -> pink edge.
-    for (expand, width, alpha) in [
-        (4.0_f32, 4.0_f32, 12u8),
-        (2.0_f32, 2.4_f32, 26u8),
-        (0.9_f32, 1.4_f32, 52u8),
-    ] {
-        paint_gradient_rounded_rect_stroke(
-            painter,
-            rect.expand(expand),
-            rounding + expand,
-            width,
-            LOGO_BLUE,
-            LOGO_LAVENDER,
-            LOGO_PINK,
-            alpha,
-        );
-    }
-    paint_gradient_rounded_rect_stroke(
-        painter,
-        rect,
-        rounding,
-        1.5_f32,
-        LOGO_BLUE,
-        LOGO_LAVENDER,
-        LOGO_PINK,
-        245,
-    );
-}
-
 fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32, pal: &ThemePalette) {
     let y = ui.cursor().top();
     ui.painter()
@@ -445,7 +445,7 @@ fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32, pal: &ThemePal
 }
 
 fn draw_theme_toggle_button(ui: &mut egui::Ui, mode: ThemeMode, pal: &ThemePalette) -> bool {
-    let size = Vec2::splat(22.0);
+    let size = Vec2::splat(HEADER_ROW_H);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let hovered = resp.hovered();
     let fill = if hovered { pal.widget_hover } else { pal.widget };
@@ -609,42 +609,52 @@ pub fn draw_compact_main_snapshot(
         .frame(
             egui::Frame::none()
                 .fill(pal.bg)
-                .inner_margin(Margin {
-                    left: SPACE_MD,
-                    right: SPACE_MD,
-                    top: SPACE_SM,
-                    bottom: 2.0,
-                }),
+                .inner_margin(Margin::same(SPACE_MD)),
         )
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.horizontal(|ui| {
-                ui.heading(RichText::new("Controllers").color(pal.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = SPACE_XS + 2.0;
-                    if ui.small_button("Refresh").clicked() {
-                        send(EngineCommand::RefreshStatus);
-                    }
-                    if draw_theme_toggle_button(ui, mode, &pal) {
-                        send(EngineCommand::SetThemeMode(mode.toggled()));
-                    }
-                });
-            });
+            ui.spacing_mut().item_spacing.y = SPACE_SM;
+            let header_w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                Vec2::new(header_w, HEADER_ROW_H),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.add(egui::Label::new(
+                        RichText::new("Controllers").heading().color(pal.text),
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                        ui.spacing_mut().button_padding = Vec2::new(SPACE_MD, 0.0);
+                        ui.add_space(SPACE_SM);
+                        let refresh_btn = egui::Button::new(
+                            RichText::new("Refresh").small().color(pal.text),
+                        )
+                        .fill(pal.widget)
+                        .stroke(Stroke::new(1.0_f32, pal.border))
+                        .rounding(Rounding::same(6.0))
+                        .min_size(Vec2::new(64.0, HEADER_ROW_H));
+                        if ui.add(refresh_btn).clicked() {
+                            send(EngineCommand::RefreshStatus);
+                        }
+                        if draw_theme_toggle_button(ui, mode, &pal) {
+                            send(EngineCommand::SetThemeMode(mode.toggled()));
+                        }
+                    });
+                },
+            );
 
             if snap.controllers.is_empty() {
-                ui.add_space(SPACE_XS + 2.0);
                 let empty_resp = egui::Frame::none()
                     .fill(pal.panel)
                     .rounding(CARD_ROUNDING)
                     .stroke(Stroke::new(1.0_f32, pal.border))
-                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM))
+                    .inner_margin(Margin::same(SPACE_MD))
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
+                        ui.spacing_mut().item_spacing.y = SPACE_XS;
                         ui.label(
                             RichText::new("No physical controllers detected.").color(pal.text),
                         );
-                        ui.add_space(SPACE_XS);
                         ui.label(
                             RichText::new("Connect a controller via Bluetooth or USB.")
                                 .small()
@@ -652,7 +662,7 @@ pub fn draw_compact_main_snapshot(
                         );
                     });
                 state.desired_compact_logical_h =
-                    Some((empty_resp.response.rect.bottom() + SPACE_SM + status_bar_h).ceil());
+                    Some((empty_resp.response.rect.bottom() + SPACE_MD + status_bar_h).ceil());
                 return;
             }
 
@@ -660,78 +670,85 @@ pub fn draw_compact_main_snapshot(
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    // Inner 6px inset keeps active cards' 4px static outer glow unclipped while locking single-column vertical flow.
-                    let stack_resp = egui::Frame::none()
-                        .inner_margin(Margin::symmetric(SPACE_XS + 2.0, SPACE_XS + 2.0))
-                        .show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 0.0;
-                            let avail_col = ui.available_width();
-                            ui.set_max_width(avail_col);
-                            let card_inner_w = (avail_col - SPACE_MD * 2.0).max(200.0);
-                            let total_cards = snap.controllers.len();
-                            for (idx, ctrl) in snap.controllers.iter().enumerate() {
-                                let is_selected =
-                                    state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
-                                let card_fill = if is_selected {
-                                    pal.widget
-                                } else {
-                                    pal.panel
-                                };
-                                let card_stroke = if ctrl.virtual_active {
-                                    Stroke::NONE
-                                } else {
-                                    Stroke::new(
-                                        1.0_f32,
-                                        if is_selected { pal.accent_line } else { pal.border },
-                                    )
-                                };
+                    let stack_resp = ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let avail_col = ui.available_width();
+                        ui.set_max_width(avail_col);
+                        let card_inner_w = (avail_col - SPACE_MD * 2.0).max(200.0);
+                        let total_cards = snap.controllers.len();
+                        for (idx, ctrl) in snap.controllers.iter().enumerate() {
+                            let is_selected =
+                                state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
+                            let card_fill = if is_selected {
+                                pal.widget
+                            } else {
+                                pal.panel
+                            };
+                            let card_bg_slot = if ctrl.virtual_active {
+                                Some(ui.painter().add(egui::Shape::Noop))
+                            } else {
+                                None
+                            };
+                            let card_stroke = if ctrl.virtual_active {
+                                Stroke::NONE
+                            } else {
+                                Stroke::new(
+                                    1.0_f32,
+                                    if is_selected { pal.accent_line } else { pal.border },
+                                )
+                            };
+                            let frame_fill = if ctrl.virtual_active {
+                                Color32::TRANSPARENT
+                            } else {
+                                card_fill
+                            };
 
-                                let card_resp = egui::Frame::none()
-                                    .fill(card_fill)
-                                    .rounding(CARD_ROUNDING)
-                                    .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM))
-                                    .stroke(card_stroke)
-                                    .show(ui, |ui| {
-                                        ui.set_width(card_inner_w);
-                                        ui.spacing_mut().item_spacing.y = SPACE_XS;
+                            let card_resp = egui::Frame::none()
+                                .fill(frame_fill)
+                                .rounding(CARD_ROUNDING)
+                                .inner_margin(Margin::same(SPACE_MD))
+                                .stroke(card_stroke)
+                                .show(ui, |ui| {
+                                    ui.set_width(card_inner_w);
+                                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_SM, SPACE_XS);
 
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                            let dot = if ctrl.connected {
-                                                LOGO_BLUE
-                                            } else {
-                                                pal.muted
-                                            };
-                                            draw_status_dot(ui, dot);
-                                            let title_resp = ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&ctrl.name)
-                                                        .strong()
-                                                        .color(pal.text),
-                                                )
-                                                .truncate()
-                                                .sense(egui::Sense::click()),
-                                            );
-                                            if title_resp.clicked() {
-                                                state.selected_controller =
-                                                    Some(ctrl.canonical_id.clone());
-                                            }
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if draw_collapse_chevron_button(
-                                                        ui,
-                                                        ctrl.show_live_input,
-                                                        &pal,
-                                                    ) {
-                                                        send(EngineCommand::SetDeviceShowLiveInput {
-                                                            key: ctrl.key.clone(),
-                                                            show_live_input: !ctrl.show_live_input,
-                                                        });
-                                                    }
-                                                },
-                                            );
-                                        });
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                        let dot = if ctrl.connected {
+                                            STATUS_GREEN
+                                        } else {
+                                            STATUS_RED
+                                        };
+                                        draw_status_dot(ui, dot);
+                                        let title_resp = ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&ctrl.name)
+                                                    .strong()
+                                                    .color(pal.text),
+                                            )
+                                            .truncate()
+                                            .sense(egui::Sense::click()),
+                                        );
+                                        if title_resp.clicked() {
+                                            state.selected_controller =
+                                                Some(ctrl.canonical_id.clone());
+                                        }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if draw_collapse_chevron_button(
+                                                    ui,
+                                                    ctrl.show_live_input,
+                                                    &pal,
+                                                ) {
+                                                    send(EngineCommand::SetDeviceShowLiveInput {
+                                                        key: ctrl.key.clone(),
+                                                        show_live_input: !ctrl.show_live_input,
+                                                    });
+                                                }
+                                            },
+                                        );
+                                    });
 
                                     ui.label(
                                         RichText::new(format!(
@@ -749,6 +766,14 @@ pub fn draw_compact_main_snapshot(
 
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                        draw_status_dot(
+                                            ui,
+                                            if ctrl.enabled {
+                                                STATUS_GREEN
+                                            } else {
+                                                STATUS_RED
+                                            },
+                                        );
                                         let mut enabled = ctrl.enabled;
                                         if ui.checkbox(&mut enabled, "Active").changed() {
                                             send(EngineCommand::SetDeviceEnabled {
@@ -761,7 +786,7 @@ pub fn draw_compact_main_snapshot(
                                                 .fill(pal.pill_blue_fill)
                                                 .rounding(Rounding::same(4.0))
                                                 .stroke(Stroke::new(1.0_f32, pal.accent_line))
-                                                .inner_margin(Margin::symmetric(SPACE_SM, 2.0))
+                                                .inner_margin(Margin::symmetric(SPACE_SM, 0.0))
                                                 .show(ui, |ui| {
                                                     ui.label(
                                                         RichText::new(format!(
@@ -773,8 +798,11 @@ pub fn draw_compact_main_snapshot(
                                                     );
                                                 });
                                         }
-                                        let cloak_dot =
-                                            if ctrl.cloaked { LOGO_BLUE } else { pal.muted };
+                                        let cloak_dot = if ctrl.cloaked {
+                                            STATUS_GREEN
+                                        } else {
+                                            STATUS_RED
+                                        };
                                         draw_status_dot(ui, cloak_dot);
                                         ui.label(
                                             RichText::new(if ctrl.cloaked {
@@ -884,8 +912,16 @@ pub fn draw_compact_main_snapshot(
                                     }
                                 });
 
-                            if ctrl.virtual_active {
-                                paint_active_card_neon_edge_and_glow(
+                            if let Some(slot) = card_bg_slot {
+                                let inner_poly = build_rounded_rect_polygon(
+                                    card_resp.response.rect.shrink(1.0),
+                                    (CARD_ROUNDING - 1.0).max(0.0),
+                                );
+                                ui.painter().set(
+                                    slot,
+                                    egui::Shape::convex_polygon(inner_poly, card_fill, Stroke::NONE),
+                                );
+                                paint_active_card_gradient_border(
                                     ui.painter(),
                                     card_resp.response.rect,
                                     CARD_ROUNDING,
@@ -893,14 +929,14 @@ pub fn draw_compact_main_snapshot(
                             }
 
                             if idx + 1 < total_cards {
-                                ui.add_space(SPACE_LG);
+                                ui.add_space(SPACE_MD);
                             }
                         }
                     });
                     content_bottom_y = Some(stack_resp.response.rect.bottom());
             });
             if let Some(cb) = content_bottom_y {
-                state.desired_compact_logical_h = Some((cb + 2.0 + status_bar_h).ceil());
+                state.desired_compact_logical_h = Some((cb + SPACE_MD + status_bar_h).ceil());
             }
         });
 
@@ -1407,7 +1443,7 @@ fn draw_remap_combobox(
 fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot, pal: &ThemePalette) {
     ui.spacing_mut().item_spacing.x = SPACE_SM;
     let ds = &snap.driver_status;
-    draw_status_dot(ui, if ds.vigem_installed { LOGO_BLUE } else { LOGO_PINK });
+    draw_status_dot(ui, if ds.vigem_installed { STATUS_GREEN } else { STATUS_RED });
     ui.label(
         RichText::new(if ds.vigem_installed {
             "ViGEmBus: OK"
@@ -1420,11 +1456,11 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot, pal: &ThemePale
     ui.separator();
 
     let (hh_text, hh_dot) = if !ds.hidhide_installed {
-        ("HidHide: Missing", LOGO_PINK)
+        ("HidHide: Missing", STATUS_RED)
     } else if ds.hidhide_accessible {
-        ("HidHide: Ready", LOGO_BLUE)
+        ("HidHide: Ready", STATUS_GREEN)
     } else {
-        ("HidHide: Locked", LOGO_PINK)
+        ("HidHide: Locked", STATUS_RED)
     };
     draw_status_dot(ui, hh_dot);
     ui.label(RichText::new(hh_text).small().color(pal.text));
@@ -1455,7 +1491,7 @@ fn draw_status_bar(
     }
 
     ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
+        ui.spacing_mut().item_spacing.y = SPACE_XS;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = SPACE_SM;
             ui.spacing_mut().button_padding = Vec2::new(SPACE_SM, SPACE_XS);
@@ -1472,21 +1508,21 @@ fn draw_status_bar(
                             .color(pal.text),
                     )
                     .fill(pal.pill_pink_fill)
-                    .stroke(Stroke::new(1.0_f32, LOGO_PINK))
+                    .stroke(Stroke::new(1.0_f32, STATUS_RED))
                     .rounding(Rounding::same(6.0));
                     if ui.add(install_btn).clicked() {
                         send(EngineCommand::InstallDrivers);
                     }
                 });
             } else if ds.reboot_recommended {
-                draw_status_dot(ui, LOGO_PINK);
+                draw_status_dot(ui, STATUS_RED);
                 ui.label(
                     RichText::new("Reboot recommended to finish driver setup")
                         .small()
                         .color(pal.muted),
                 );
             } else if let Some(err) = &ds.hidhide_error {
-                draw_status_dot(ui, LOGO_PINK);
+                draw_status_dot(ui, STATUS_RED);
                 ui.add(
                     egui::Label::new(RichText::new(err).small().color(pal.muted)).truncate(),
                 );
@@ -1827,12 +1863,12 @@ mod tests {
     }
 
     #[test]
-    fn battery_bar_uses_pink_at_or_below_twenty_and_blue_above() {
-        assert_eq!(battery_bar_color(Some(0)), LOGO_PINK);
-        assert_eq!(battery_bar_color(Some(20)), LOGO_PINK);
-        assert_eq!(battery_bar_color(Some(21)), LOGO_BLUE);
-        assert_eq!(battery_bar_color(Some(100)), LOGO_BLUE);
-        assert_eq!(battery_bar_color(None), LOGO_BLUE);
+    fn battery_bar_uses_red_at_or_below_twenty_and_green_above() {
+        assert_eq!(battery_bar_color(Some(0)), STATUS_RED);
+        assert_eq!(battery_bar_color(Some(20)), STATUS_RED);
+        assert_eq!(battery_bar_color(Some(21)), STATUS_GREEN);
+        assert_eq!(battery_bar_color(Some(100)), STATUS_GREEN);
+        assert_eq!(battery_bar_color(None), STATUS_GREEN);
     }
 
     #[test]
@@ -2113,12 +2149,12 @@ mod tests {
             .desired_compact_logical_h
             .expect("desired_compact_logical_h populated on expanded render");
         assert!(
-            collapsed_h < 250.0 && (expanded_h - collapsed_h) > 100.0,
+            collapsed_h < 270.0 && (expanded_h - collapsed_h) > 100.0,
             "collapsed height ({collapsed_h}) should hug header-only card and shrink >100px vs expanded ({expanded_h})"
         );
         let edit_pt = find_text_center(&out_col.shapes, "Edit Profile").unwrap();
-        // Bottom margin of collapsed card sits tightly below Edit Profile button (no reserved dead space)
-        assert!(collapsed_h - (edit_pt.y + 12.0) < 68.0);
+        // Bottom margin of collapsed card sits cleanly below Edit Profile button (uniform 12pt scale)
+        assert!(collapsed_h - (edit_pt.y + 12.0) < 76.0);
     }
 
     #[test]
@@ -2172,7 +2208,7 @@ mod tests {
             },
         );
         let refresh_center = find_text_center(&out_dark.shapes, "Refresh").unwrap();
-        let toggle_center = Pos2::new(refresh_center.x - 42.0, refresh_center.y);
+        let toggle_center = Pos2::new(refresh_center.x - 52.0, refresh_center.y);
 
         let mut emitted = Vec::new();
         for (i, pressed) in [(1, true), (2, false)] {
