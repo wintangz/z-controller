@@ -45,6 +45,7 @@ fn main() {
     let mut smoke_dual_pad = false;
     let mut preview_cards = false;
     let mut preview_one_collapsed = false;
+    let mut preview_missing_drivers = false;
     let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
     let mut show_editor_profile: Option<String> = None;
@@ -80,6 +81,7 @@ fn main() {
             "--smoke-dual-pad" => smoke_dual_pad = true,
             "--preview-cards" => preview_cards = true,
             "--preview-one-collapsed" => preview_one_collapsed = true,
+            "--preview-missing-drivers" => preview_missing_drivers = true,
             "--live-demo-pad" => live_demo_pad = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
@@ -237,11 +239,24 @@ fn main() {
         None
     };
 
+    let preview_driver_status = if preview_missing_drivers {
+        Some(z_core::backend::DriverStatus {
+            vigem_installed: false,
+            hidhide_installed: false,
+            hidhide_accessible: false,
+            hidhide_error: None,
+            reboot_recommended: false,
+        })
+    } else {
+        None
+    };
+
     if let Err(err) = tray_win32::run_tray_app(
         engine,
         open_immediately,
         show_editor_profile,
         preview,
+        preview_driver_status,
         tray_smoke_ms,
         test_dpi,
     ) {

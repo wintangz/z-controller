@@ -31,6 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
     WS_THICKFRAME,
 };
+use z_core::backend::DriverStatus;
 
 use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
@@ -264,6 +265,7 @@ struct AppShared {
     engine: Arc<Mutex<EngineHandle>>,
     ui_state: Mutex<AppUiState>,
     preview_controllers: Option<Vec<ControllerSnapshot>>,
+    preview_driver_status: Option<DriverStatus>,
     start_time: Instant,
     hinstance: HINSTANCE,
     large_icon: HICON,
@@ -319,6 +321,7 @@ pub fn run_tray_app(
     open_immediately: bool,
     initial_editor_profile: Option<String>,
     preview_controllers: Option<Vec<ControllerSnapshot>>,
+    preview_driver_status: Option<DriverStatus>,
     smoke_exit_after_ms: Option<u64>,
     test_dpi: Option<u32>,
 ) -> Result<(), String> {
@@ -350,6 +353,7 @@ pub fn run_tray_app(
         engine: Arc::new(Mutex::new(engine)),
         ui_state: Mutex::new(AppUiState::default()),
         preview_controllers,
+        preview_driver_status,
         start_time: Instant::now(),
         hinstance,
         large_icon,
@@ -1036,44 +1040,36 @@ unsafe extern "system" fn wnd_proc(
                     .entry(ViewportId::ROOT)
                     .or_default()
                     .native_pixels_per_point = Some(ppp);
-                let preview_list = shared.preview_controllers.as_ref();
                 let role = st.role;
-                let snap_for_hash = eng.snapshot();
-                let full_out = egui_ctx.run(raw, |ctx| match (role, preview_list) {
-                    (WindowRole::Main, Some(preview)) => {
-                        let snap = EngineSnapshot {
-                            controllers: preview.clone(),
-                            config: snap_for_hash.config.clone(),
-                            driver_status: snap_for_hash.driver_status.clone(),
-                            last_status_message: snap_for_hash.last_status_message.clone(),
-                        };
-                        actions = draw_compact_main_snapshot(ctx, &mut ui_state, &snap, |cmd| {
+                let base_snap = eng.snapshot();
+                let effective_snap = if shared.preview_controllers.is_some()
+                    || shared.preview_driver_status.is_some()
+                {
+                    let mut cloned: EngineSnapshot = (*base_snap).clone();
+                    if let Some(preview) = shared.preview_controllers.as_ref() {
+                        cloned.controllers = preview.clone();
+                    }
+                    if let Some(preview_ds) = shared.preview_driver_status.as_ref() {
+                        cloned.driver_status = preview_ds.clone();
+                    }
+                    Some(cloned)
+                } else {
+                    None
+                };
+                let snap_ref: &EngineSnapshot = effective_snap.as_ref().unwrap_or(&base_snap);
+                let full_out = egui_ctx.run(raw, |ctx| match role {
+                    WindowRole::Main => {
+                        actions = draw_compact_main_snapshot(ctx, &mut ui_state, snap_ref, |cmd| {
                             eng.send(cmd)
                         });
                     }
-                    (WindowRole::Main, None) => {
-                        actions = draw_compact_main_snapshot(ctx, &mut ui_state, &snap_for_hash, |cmd| {
-                            eng.send(cmd)
-                        });
-                    }
-                    (WindowRole::Editor, Some(preview)) => {
-                        let snap = EngineSnapshot {
-                            controllers: preview.clone(),
-                            config: snap_for_hash.config.clone(),
-                            driver_status: snap_for_hash.driver_status.clone(),
-                            last_status_message: snap_for_hash.last_status_message.clone(),
-                        };
-                        draw_profile_editor_snapshot(ctx, &mut ui_state, &snap, |cmd| {
-                            eng.send(cmd)
-                        });
-                    }
-                    (WindowRole::Editor, None) => {
-                        draw_profile_editor_snapshot(ctx, &mut ui_state, &snap_for_hash, |cmd| {
+                    WindowRole::Editor => {
+                        draw_profile_editor_snapshot(ctx, &mut ui_state, snap_ref, |cmd| {
                             eng.send(cmd)
                         });
                     }
                 });
-                let static_key = static_ui_hash(&snap_for_hash, &ui_state);
+                let static_key = static_ui_hash(snap_ref, &ui_state);
                 if role == WindowRole::Main && !st.in_size_move {
                     if let Some(raw_h) = ui_state.desired_compact_logical_h {
                         let clamped_h = (raw_h.ceil() as i32)

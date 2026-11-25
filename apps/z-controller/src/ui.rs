@@ -35,7 +35,6 @@ pub const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 176); // #9A9AB0
 pub const SPACE_XS: f32 = 4.0;
 pub const SPACE_SM: f32 = 8.0;
 pub const SPACE_MD: f32 = 12.0;
-#[allow(dead_code)]
 pub const SPACE_LG: f32 = 16.0;
 
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
@@ -442,9 +441,16 @@ pub fn draw_compact_main_snapshot(
     }
 
     state.last_dynamic_rect_main = None;
+    let ds = &snap.driver_status;
+    let has_driver_alert = !ds.vigem_installed
+        || !ds.hidhide_installed
+        || ds.reboot_recommended
+        || ds.hidhide_error.is_some();
+    let status_bar_h = if has_driver_alert { 68.0_f32 } else { 36.0_f32 };
+
     // Bottom status bar (driver readiness, HidHide lock warnings, live RAM readout — NO popups)
     egui::TopBottomPanel::bottom("compact_status_bar")
-        .exact_height(36.0)
+        .exact_height(status_bar_h)
         .frame(
             egui::Frame::none()
                 .fill(PANEL_SURFACE)
@@ -457,7 +463,7 @@ pub fn draw_compact_main_snapshot(
                 [Pos2::new(sr.left(), top_y), Pos2::new(sr.right(), top_y)],
                 Stroke::new(1.0_f32, SUBTLE_BORDER),
             );
-            draw_status_bar(ui, snap, &mut send);
+            draw_status_bar(ui, snap, has_driver_alert, &mut send);
         });
 
     egui::CentralPanel::default()
@@ -504,7 +510,7 @@ pub fn draw_compact_main_snapshot(
                         );
                     });
                 state.desired_compact_logical_h =
-                    Some((empty_resp.response.rect.bottom() + SPACE_SM + 36.0).ceil());
+                    Some((empty_resp.response.rect.bottom() + SPACE_SM + status_bar_h).ceil());
                 return;
             }
 
@@ -743,14 +749,14 @@ pub fn draw_compact_main_snapshot(
                             }
 
                             if idx + 1 < total_cards {
-                                ui.add_space(SPACE_SM);
+                                ui.add_space(SPACE_LG);
                             }
                         }
                     });
                     content_bottom_y = Some(stack_resp.response.rect.bottom());
             });
             if let Some(cb) = content_bottom_y {
-                state.desired_compact_logical_h = Some((cb + 2.0 + 36.0).ceil());
+                state.desired_compact_logical_h = Some((cb + 2.0 + status_bar_h).ceil());
             }
         });
 
@@ -1243,63 +1249,94 @@ fn draw_remap_combobox(
         });
 }
 
+fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
+    ui.spacing_mut().item_spacing.x = SPACE_SM;
+    let ds = &snap.driver_status;
+    draw_status_dot(ui, if ds.vigem_installed { NEON_GREEN } else { NEON_PINK });
+    ui.label(
+        RichText::new(if ds.vigem_installed {
+            "ViGEmBus: OK"
+        } else {
+            "ViGEmBus: Missing"
+        })
+        .small()
+        .color(TEXT_PRIMARY),
+    );
+    ui.separator();
+
+    let (hh_text, hh_dot) = if !ds.hidhide_installed {
+        ("HidHide: Missing", NEON_PINK)
+    } else if ds.hidhide_accessible {
+        ("HidHide: Ready", NEON_GREEN)
+    } else {
+        ("HidHide: Locked", NEON_PINK)
+    };
+    draw_status_dot(ui, hh_dot);
+    ui.label(RichText::new(hh_text).small().color(TEXT_PRIMARY));
+
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let (ws, priv_b) = query_process_memory_bytes();
+        let ws_mb = ws as f64 / (1024.0 * 1024.0);
+        let priv_mb = priv_b as f64 / (1024.0 * 1024.0);
+        ui.label(
+            RichText::new(format!("RAM: {ws_mb:.1} / {priv_mb:.1} MB"))
+                .small()
+                .color(TEXT_MUTED),
+        );
+    });
+}
+
 fn draw_status_bar(
     ui: &mut egui::Ui,
     snap: &EngineSnapshot,
+    has_driver_alert: bool,
     send: &mut impl FnMut(EngineCommand),
 ) {
-    ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = SPACE_SM;
-        let ds = &snap.driver_status;
-        draw_status_dot(ui, if ds.vigem_installed { NEON_GREEN } else { NEON_PINK });
-        ui.label(
-            RichText::new(if ds.vigem_installed {
-                "ViGEmBus: OK"
-            } else {
-                "ViGEmBus: Missing"
-            })
-            .small()
-            .color(TEXT_PRIMARY),
-        );
-        ui.separator();
+    let ds = &snap.driver_status;
+    if !has_driver_alert {
+        ui.horizontal_centered(|ui| draw_status_bar_row(ui, snap));
+        return;
+    }
 
-        let (hh_text, hh_dot) = if !ds.hidhide_installed {
-            ("HidHide: Missing", NEON_PINK)
-        } else if ds.hidhide_accessible {
-            ("HidHide: Ready", NEON_GREEN)
-        } else {
-            ("HidHide: Locked", NEON_PINK)
-        };
-        draw_status_dot(ui, hh_dot);
-        ui.label(RichText::new(hh_text).small().color(TEXT_PRIMARY));
-
-        if !ds.vigem_installed || !ds.hidhide_installed {
-            if ui.button("Install Missing Drivers").clicked() {
-                send(EngineCommand::InstallDrivers);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = SPACE_SM;
+            ui.spacing_mut().button_padding = Vec2::new(SPACE_SM, SPACE_XS);
+            if !ds.vigem_installed || !ds.hidhide_installed {
+                ui.label(
+                    RichText::new("Required drivers missing")
+                        .small()
+                        .color(TEXT_MUTED),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let install_btn = egui::Button::new(
+                        RichText::new("Install Missing Drivers")
+                            .small()
+                            .color(TEXT_PRIMARY),
+                    )
+                    .fill(Color32::from_rgb(38, 18, 32))
+                    .stroke(Stroke::new(1.0_f32, NEON_PINK))
+                    .rounding(Rounding::same(6.0));
+                    if ui.add(install_btn).clicked() {
+                        send(EngineCommand::InstallDrivers);
+                    }
+                });
+            } else if ds.reboot_recommended {
+                draw_status_dot(ui, NEON_PINK);
+                ui.label(
+                    RichText::new("Reboot recommended to finish driver setup")
+                        .small()
+                        .color(TEXT_MUTED),
+                );
+            } else if let Some(err) = &ds.hidhide_error {
+                draw_status_dot(ui, NEON_PINK);
+                ui.add(
+                    egui::Label::new(RichText::new(err).small().color(TEXT_MUTED)).truncate(),
+                );
             }
-        }
-        if ds.reboot_recommended {
-            ui.separator();
-            ui.label(
-                RichText::new("Reboot recommended")
-                    .small()
-                    .color(TEXT_MUTED),
-            );
-        } else if let Some(err) = &ds.hidhide_error {
-            ui.separator();
-            ui.label(RichText::new(err).small().color(TEXT_MUTED));
-        }
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (ws, priv_b) = query_process_memory_bytes();
-            let ws_mb = ws as f64 / (1024.0 * 1024.0);
-            let priv_mb = priv_b as f64 / (1024.0 * 1024.0);
-            ui.label(
-                RichText::new(format!("RAM: {ws_mb:.1} / {priv_mb:.1} MB"))
-                    .small()
-                    .color(TEXT_MUTED),
-            );
         });
+        ui.horizontal(|ui| draw_status_bar_row(ui, snap));
     });
 }
 
