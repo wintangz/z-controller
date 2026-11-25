@@ -725,13 +725,40 @@ fn handle_sdl_event(
         }
         SdlEvent::GamepadAxisMotion { which, axis, value } => {
             if let Some(pad) = pads.get_mut(&which) {
-                match axis {
-                    SdlGamepadAxis::LeftX => pad.state.left_x = value,
-                    SdlGamepadAxis::LeftY => pad.state.left_y = value,
-                    SdlGamepadAxis::RightX => pad.state.right_x = value,
-                    SdlGamepadAxis::RightY => pad.state.right_y = value,
-                    SdlGamepadAxis::LeftTrigger => pad.state.left_trigger = value,
-                    SdlGamepadAxis::RightTrigger => pad.state.right_trigger = value,
+                let changed = match axis {
+                    SdlGamepadAxis::LeftX => {
+                        let c = pad.state.left_x != value;
+                        pad.state.left_x = value;
+                        c
+                    }
+                    SdlGamepadAxis::LeftY => {
+                        let c = pad.state.left_y != value;
+                        pad.state.left_y = value;
+                        c
+                    }
+                    SdlGamepadAxis::RightX => {
+                        let c = pad.state.right_x != value;
+                        pad.state.right_x = value;
+                        c
+                    }
+                    SdlGamepadAxis::RightY => {
+                        let c = pad.state.right_y != value;
+                        pad.state.right_y = value;
+                        c
+                    }
+                    SdlGamepadAxis::LeftTrigger => {
+                        let c = pad.state.left_trigger != value;
+                        pad.state.left_trigger = value;
+                        c
+                    }
+                    SdlGamepadAxis::RightTrigger => {
+                        let c = pad.state.right_trigger != value;
+                        pad.state.right_trigger = value;
+                        c
+                    }
+                };
+                if !changed {
+                    return false;
                 }
                 let (enabled, profile) = config.profile_for_device(&pad.key);
                 if enabled {
@@ -749,6 +776,9 @@ fn handle_sdl_event(
             down,
         } => {
             if let (Some(pad), Some(lb)) = (pads.get_mut(&which), map_sdl_button(button)) {
+                if pad.state.is_pressed(lb) == down {
+                    return false;
+                }
                 pad.state.set_button(lb, down);
                 let (enabled, profile) = config.profile_for_device(&pad.key);
                 if enabled {

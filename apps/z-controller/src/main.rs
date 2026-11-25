@@ -40,6 +40,7 @@ fn main() {
     let mut smoke_hold_ms: u64 = 1200;
     let mut smoke_dual_pad = false;
     let mut preview_cards = false;
+    let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
 
     let mut i = 1;
@@ -60,6 +61,7 @@ fn main() {
             }
             "--smoke-dual-pad" => smoke_dual_pad = true,
             "--preview-cards" => preview_cards = true,
+            "--live-demo-pad" => live_demo_pad = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
                     tray_smoke_ms = Some(args[i + 1].parse().unwrap_or(4000));
@@ -166,10 +168,38 @@ fn main() {
         None
     };
 
+    let demo_pad = if live_demo_pad {
+        match SdlVirtualGamepad::attach(0x057E, 0x2009, "Nintendo Switch Pro Controller") {
+            Ok(vp) => {
+                engine.wake();
+                std::thread::sleep(Duration::from_millis(260));
+                vp.set_axis(SdlGamepadAxis::LeftX, 24000);
+                vp.set_axis(SdlGamepadAxis::LeftY, -21000);
+                vp.set_axis(SdlGamepadAxis::RightX, 0);
+                vp.set_axis(SdlGamepadAxis::RightY, 0);
+                vp.set_axis(SdlGamepadAxis::LeftTrigger, i16::MIN);
+                vp.set_axis(SdlGamepadAxis::RightTrigger, 12000);
+                vp.set_button(SdlGamepadButton::South, true);
+                vp.pump();
+                engine.wake();
+                std::thread::sleep(Duration::from_millis(60));
+                engine.wake();
+                Some(vp)
+            }
+            Err(e) => {
+                eprintln!("live demo pad attach failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if let Err(err) = tray_win32::run_tray_app(engine, open_immediately, preview, tray_smoke_ms) {
         eprintln!("z-controller tray error: {err}");
         std::process::exit(1);
     }
+    drop(demo_pad);
 }
 
 fn build_preview_cards() -> Vec<ControllerSnapshot> {

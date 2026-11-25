@@ -3,8 +3,8 @@ use std::f32::consts::PI;
 
 use egui::epaint::{Mesh, Shadow, Vertex, WHITE_UV};
 use egui::{
-    Color32, FontData, FontDefinitions, FontFamily, FontId, Margin, Pos2, Rect, RichText, Rounding,
-    Stroke, TextStyle, Vec2,
+    Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Margin, Pos2, Rect, RichText,
+    Rounding, Stroke, TextStyle, Vec2,
 };
 use z_core::battery::BatteryStatus;
 use z_core::model::{DisconnectPolicy, LogicalButton, VirtualTargetKind};
@@ -12,7 +12,8 @@ use z_core::profile::Profile;
 use z_platform_windows::drivers::query_process_memory_bytes;
 
 use crate::engine::{
-    ControllerSnapshot, EngineCommand, EngineHandle, EngineSnapshot, VirtualOutputSnapshot,
+    ControllerSnapshot, EngineCommand, EngineHandle, EngineSnapshot, PhysicalSnapshot,
+    VirtualOutputSnapshot,
 };
 
 // Modern neon-on-black palette (neon strictly for accents, edges, bars, and dots — never large fills or body text).
@@ -639,6 +640,8 @@ fn draw_controller_list(
                                         }
                                     });
                             });
+
+                            draw_card_live_status(ui, &ctrl.physical_state);
                         });
 
                     if ctrl.virtual_active {
@@ -1087,10 +1090,194 @@ fn draw_stick_radar(
     });
 }
 
+#[inline]
+pub fn normalize_stick_axis(raw: i16) -> f32 {
+    (raw as f32 / 32767.0).clamp(-1.0, 1.0)
+}
+
+#[inline]
+pub fn normalize_trigger_axis(raw: i16) -> f32 {
+    if raw <= 0 {
+        0.0
+    } else {
+        (raw as f32 / 32767.0).clamp(0.0, 1.0)
+    }
+}
+
+const CARD_MINI_BUTTONS_ROW1: [(LogicalButton, &str); 8] = [
+    (LogicalButton::South, "A"),
+    (LogicalButton::East, "B"),
+    (LogicalButton::West, "X"),
+    (LogicalButton::North, "Y"),
+    (LogicalButton::LeftShoulder, "LB"),
+    (LogicalButton::RightShoulder, "RB"),
+    (LogicalButton::LeftStick, "L3"),
+    (LogicalButton::RightStick, "R3"),
+];
+
+const CARD_MINI_BUTTONS_ROW2: [(LogicalButton, &str); 7] = [
+    (LogicalButton::DpadUp, "Up"),
+    (LogicalButton::DpadDown, "Dn"),
+    (LogicalButton::DpadLeft, "Lt"),
+    (LogicalButton::DpadRight, "Rt"),
+    (LogicalButton::Back, "Bk"),
+    (LogicalButton::Start, "St"),
+    (LogicalButton::Guide, "Gd"),
+];
+
+fn draw_card_live_status(ui: &mut egui::Ui, phys: &PhysicalSnapshot) {
+    ui.add_space(4.0);
+    let sep_y = ui.cursor().top();
+    let bounds = ui.min_rect();
+    ui.painter().line_segment(
+        [Pos2::new(bounds.left(), sep_y), Pos2::new(bounds.right(), sep_y)],
+        Stroke::new(1.0_f32, SUBTLE_BORDER),
+    );
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        draw_mini_stick_pad(
+            ui,
+            "L",
+            normalize_stick_axis(phys.left_x),
+            normalize_stick_axis(phys.left_y),
+        );
+        draw_mini_stick_pad(
+            ui,
+            "R",
+            normalize_stick_axis(phys.right_x),
+            normalize_stick_axis(phys.right_y),
+        );
+        ui.vertical(|ui| {
+            ui.add_space(3.0);
+            draw_mini_trigger_row(ui, "LT", normalize_trigger_axis(phys.left_trigger));
+            ui.add_space(4.0);
+            draw_mini_trigger_row(ui, "RT", normalize_trigger_axis(phys.right_trigger));
+        });
+    });
+
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.5;
+        for (btn, label) in CARD_MINI_BUTTONS_ROW1 {
+            let pressed = (phys.buttons_mask & btn.bit()) != 0;
+            draw_mini_button_pill(ui, label, pressed);
+        }
+    });
+    ui.add_space(3.5);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.5;
+        for (btn, label) in CARD_MINI_BUTTONS_ROW2 {
+            let pressed = (phys.buttons_mask & btn.bit()) != 0;
+            draw_mini_button_pill(ui, label, pressed);
+        }
+    });
+}
+
+fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
+    let size = 44.0_f32;
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
+    let p = ui.painter();
+    let center = rect.center();
+    let radius = 19.0_f32;
+
+    p.circle_filled(center, radius, BG_NEAR_BLACK);
+    p.circle_stroke(center, radius, Stroke::new(1.0_f32, SUBTLE_BORDER));
+    p.line_segment(
+        [Pos2::new(center.x - radius + 2.0, center.y), Pos2::new(center.x + radius - 2.0, center.y)],
+        Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
+    );
+    p.line_segment(
+        [Pos2::new(center.x, center.y - radius + 2.0), Pos2::new(center.x, center.y + radius - 2.0)],
+        Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
+    );
+    p.text(
+        rect.min + Vec2::new(2.0, 0.0),
+        Align2::LEFT_TOP,
+        tag,
+        FontId::new(9.5, FontFamily::Proportional),
+        TEXT_MUTED,
+    );
+
+    let mag = (x * x + y * y).sqrt();
+    let travel = radius - 4.5_f32;
+    let clamped_scale = if mag > 1.0 { 1.0 / mag } else { 1.0 };
+    let dot_pos = Pos2::new(
+        center.x + x * clamped_scale * travel,
+        center.y + y * clamped_scale * travel,
+    );
+    if mag > 0.08 {
+        p.circle_filled(
+            dot_pos,
+            6.5,
+            Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 64),
+        );
+        p.circle_filled(dot_pos, 3.8, NEON_PINK);
+    } else {
+        p.circle_filled(dot_pos, 3.0, NEON_VIOLET);
+    }
+}
+
+fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.label(
+            RichText::new(label)
+                .font(FontId::new(10.5, FontFamily::Proportional))
+                .color(TEXT_MUTED),
+        );
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(82.0, 7.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
+        let u = frac.clamp(0.0, 1.0);
+        if u > 0.01 {
+            let inner = rect.shrink(1.0);
+            let fw = (inner.width() * u).max(3.0).min(inner.width());
+            p.rect_filled(
+                Rect::from_min_size(inner.min, Vec2::new(fw, inner.height())),
+                Rounding::same(2.5),
+                NEON_VIOLET,
+            );
+        }
+        ui.label(
+            RichText::new(format!("{:.0}%", u * 100.0))
+                .font(FontId::new(10.5, FontFamily::Proportional))
+                .color(if u > 0.01 { TEXT_PRIMARY } else { TEXT_MUTED }),
+        );
+    });
+}
+
+fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(26.5, 17.0), egui::Sense::hover());
+    let p = ui.painter();
+    if pressed {
+        p.rect_stroke(
+            rect.expand(1.2),
+            Rounding::same(4.5),
+            Stroke::new(
+                1.5_f32,
+                Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 80),
+            ),
+        );
+        p.rect_filled(rect, Rounding::same(3.5), Color32::from_rgb(38, 24, 58));
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.5_f32, NEON_VIOLET));
+    } else {
+        p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(10.0, FontFamily::Proportional),
+        if pressed { TEXT_PRIMARY } else { TEXT_MUTED },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::PhysicalSnapshot;
     use z_core::backend::DriverStatus;
     use z_core::battery::BatteryReading;
     use z_core::model::{ControllerFamily, HardwareKey, Transport, VirtualTargetKind};
@@ -1111,6 +1298,30 @@ mod tests {
         assert_eq!(lerp_color(NEON_VIOLET, NEON_PINK, 1.0), NEON_PINK);
         let mid = lerp_color(NEON_VIOLET, NEON_PINK, 0.5);
         assert_eq!(mid, Color32::from_rgb(212, 102, 212));
+    }
+
+    #[test]
+    fn card_live_status_covers_all_buttons_and_axis_normalization() {
+        let mut seen = Vec::new();
+        for (btn, _) in CARD_MINI_BUTTONS_ROW1
+            .iter()
+            .chain(CARD_MINI_BUTTONS_ROW2.iter())
+        {
+            if !seen.contains(btn) {
+                seen.push(*btn);
+            }
+        }
+        assert_eq!(seen.len(), LogicalButton::ALL.len());
+        for b in LogicalButton::ALL {
+            assert!(seen.contains(&b), "missing button {b:?} from card live status view");
+        }
+
+        assert_eq!(normalize_stick_axis(0), 0.0);
+        assert_eq!(normalize_stick_axis(i16::MAX), 1.0);
+        assert_eq!(normalize_stick_axis(i16::MIN), -1.0);
+        assert_eq!(normalize_trigger_axis(0), 0.0);
+        assert_eq!(normalize_trigger_axis(-500), 0.0);
+        assert_eq!(normalize_trigger_axis(i16::MAX), 1.0);
     }
 
     #[test]
@@ -1139,7 +1350,15 @@ mod tests {
                         status: BatteryStatus::OnBattery,
                         source: "sdl3",
                     },
-                    physical_state: PhysicalSnapshot::default(),
+                    physical_state: PhysicalSnapshot {
+                        buttons_mask: LogicalButton::South.bit() | LogicalButton::RightShoulder.bit(),
+                        left_x: 24000,
+                        left_y: -21000,
+                        right_x: 0,
+                        right_y: 0,
+                        left_trigger: 0,
+                        right_trigger: 22384,
+                    },
                     virtual_output: VirtualOutputSnapshot::None,
                     instance_id: None,
                 },
