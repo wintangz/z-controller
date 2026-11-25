@@ -373,9 +373,9 @@ fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool) -> bool {
         p.line_segment([Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 2.5)], st);
         p.line_segment([Pos2::new(c.x, c.y + 2.5), Pos2::new(c.x + 4.0, c.y - 2.0)], st);
     } else {
-        // Chevron right (collapsed)
-        p.line_segment([Pos2::new(c.x - 2.0, c.y - 4.0), Pos2::new(c.x + 2.5, c.y)], st);
-        p.line_segment([Pos2::new(c.x + 2.5, c.y), Pos2::new(c.x - 2.0, c.y + 4.0)], st);
+        // Chevron left (<) when collapsed
+        p.line_segment([Pos2::new(c.x + 2.0, c.y - 4.0), Pos2::new(c.x - 2.5, c.y)], st);
+        p.line_segment([Pos2::new(c.x - 2.5, c.y), Pos2::new(c.x + 2.0, c.y + 4.0)], st);
     }
     resp.clicked()
 }
@@ -568,6 +568,20 @@ pub fn draw_compact_main_snapshot(
                                                 state.selected_controller =
                                                     Some(ctrl.canonical_id.clone());
                                             }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if draw_collapse_chevron_button(
+                                                        ui,
+                                                        ctrl.show_live_input,
+                                                    ) {
+                                                        send(EngineCommand::SetDeviceShowLiveInput {
+                                                            key: ctrl.key.clone(),
+                                                            show_live_input: !ctrl.show_live_input,
+                                                        });
+                                                    }
+                                                },
+                                            );
                                         });
 
                                     ui.label(
@@ -635,11 +649,23 @@ pub fn draw_compact_main_snapshot(
                                         ui.label(
                                             RichText::new("Profile:").small().color(TEXT_MUTED),
                                         );
+                                        let edit_text_w = ui.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                "Edit Profile".to_owned(),
+                                                TextStyle::Small.resolve(ui.style()),
+                                                TEXT_PRIMARY,
+                                            )
+                                            .size()
+                                            .x
+                                        });
+                                        let edit_btn_w = (edit_text_w + SPACE_SM * 2.0 + 4.0).ceil();
+                                        let combo_w =
+                                            (ui.available_width() - edit_btn_w - SPACE_SM).max(120.0);
                                         egui::ComboBox::from_id_salt((
                                             "ctrl_prof",
                                             &ctrl.canonical_id,
                                         ))
-                                        .width(164.0)
+                                        .width(combo_w)
                                         .truncate()
                                         .selected_text(
                                             RichText::new(&ctrl.profile_name)
@@ -669,6 +695,7 @@ pub fn draw_compact_main_snapshot(
                                         let edit_btn = egui::Button::new(
                                             RichText::new("Edit Profile").small().color(TEXT_PRIMARY),
                                         )
+                                        .min_size(Vec2::new(edit_btn_w, 0.0))
                                         .fill(Color32::from_rgb(27, 22, 42))
                                         .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
                                         .rounding(Rounding::same(6.0));
@@ -686,21 +713,6 @@ pub fn draw_compact_main_snapshot(
                                                 profile_id: ctrl.profile_id.clone(),
                                             });
                                         }
-
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if draw_collapse_chevron_button(
-                                                    ui,
-                                                    ctrl.show_live_input,
-                                                ) {
-                                                    send(EngineCommand::SetDeviceShowLiveInput {
-                                                        key: ctrl.key.clone(),
-                                                        show_live_input: !ctrl.show_live_input,
-                                                    });
-                                                }
-                                            },
-                                        );
                                     });
 
                                     if ctrl.show_live_input {
@@ -1809,8 +1821,9 @@ mod tests {
             .expect("expected live input section rect when show_live_input=true");
         assert!(exp_dyn.height() > 90.0);
 
-        // Locate chevron toggle button at the right end of the Profile row (next to "Edit Profile")
-        let edit_center = find_text_center(&out_exp.shapes, "Edit Profile").unwrap();
+        // Locate chevron toggle button in the card header (top-right corner, aligned with controller name)
+        let name_center =
+            find_text_center(&out_exp.shapes, "Nintendo Switch Pro Controller").unwrap();
         fn find_square_button_near_y(shapes: &[egui::epaint::ClippedShape], target_y: f32) -> Option<Pos2> {
             fn scan(s: &egui::Shape, target_y: f32) -> Option<Pos2> {
                 match s {
@@ -1827,9 +1840,8 @@ mod tests {
             }
             shapes.iter().rev().find_map(|c| scan(&c.shape, target_y))
         }
-        let toggle_pos = find_square_button_near_y(&out_exp.shapes, edit_center.y)
-            .expect("expected 20x20 chevron toggle button on Profile row");
-        assert!(toggle_pos.x > edit_center.x);
+        let toggle_pos = find_square_button_near_y(&out_exp.shapes, name_center.y)
+            .expect("expected 20x20 chevron toggle button on card header");
         for (i, pressed) in [(1, true), (2, false)] {
             let _ = ctx.run(
                 egui::RawInput {
