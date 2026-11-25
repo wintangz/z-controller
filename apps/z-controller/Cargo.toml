@@ -1,0 +1,24 @@
+[package]
+name = "z-controller"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+egui = { version = "0.29", default-features = false, features = ["default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+z-core = { path = "../../crates/z-core" }
+z-sdl3 = { path = "../../crates/z-sdl3" }
+z-platform-windows = { path = "../../crates/z-platform-windows" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.59.0", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

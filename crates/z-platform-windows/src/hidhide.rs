@@ -466,3 +466,23 @@ pub fn emergency_uncloak() -> Result<(), HidHideError> {
         .clear();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_sz_round_trip() {
+        let items = vec![
+            r"HID\VID_057E&PID_2009\1".to_string(),
+            r"\Device\HarddiskVolume1\z-controller.exe".to_string(),
+        ];
+        let encoded = encode_multi_sz(&items);
+        assert_eq!(encoded[encoded.len() - 2..], [0, 0]);
+        assert_eq!(decode_multi_sz(&encoded), items);
+
+        let empty = encode_multi_sz(&[]);
+        assert_eq!(empty, vec![0, 0]);
+        assert!(decode_multi_sz(&empty).is_empty());
+    }
+}

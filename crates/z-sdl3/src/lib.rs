@@ -315,6 +315,43 @@ pub struct SdlIoStreamOpaque {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+pub struct SdlJoystickOpaque {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct SdlVirtualJoystickDesc {
+    pub version: u32,
+    pub r#type: u16,
+    pub padding: u16,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub naxes: u16,
+    pub nbuttons: u16,
+    pub nballs: u16,
+    pub nhats: u16,
+    pub ntouchpads: u16,
+    pub nsensors: u16,
+    pub padding2: [u16; 2],
+    pub button_mask: u32,
+    pub axis_mask: u32,
+    pub name: *const c_char,
+    pub touchpads: *const c_void,
+    pub sensors: *const c_void,
+    pub userdata: *mut c_void,
+    pub update: Option<unsafe extern "C" fn(*mut c_void)>,
+    pub set_player_index: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
+    pub rumble: Option<unsafe extern "C" fn(*mut c_void, u16, u16) -> bool>,
+    pub rumble_triggers: Option<unsafe extern "C" fn(*mut c_void, u16, u16) -> bool>,
+    pub set_led: Option<unsafe extern "C" fn(*mut c_void, u8, u8, u8) -> bool>,
+    pub send_effect: Option<unsafe extern "C" fn(*mut c_void, *const c_void, c_int) -> bool>,
+    pub set_sensors_enabled: Option<unsafe extern "C" fn(*mut c_void, bool) -> bool>,
+    pub cleanup: Option<unsafe extern "C" fn(*mut c_void)>,
+}
+
+const _: () = assert!(std::mem::size_of::<SdlVirtualJoystickDesc>() == 136);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SdlPowerInfo {
     pub state: SdlPowerState,
@@ -343,9 +380,20 @@ struct SdlApi {
     sdl_get_gamepad_serial: unsafe extern "C" fn(*mut SdlGamepadOpaque) -> *const c_char,
     sdl_get_gamepad_connection_state: unsafe extern "C" fn(*mut SdlGamepadOpaque) -> i32,
     sdl_get_gamepad_power_info: unsafe extern "C" fn(*mut SdlGamepadOpaque, *mut c_int) -> i32,
+    sdl_get_gamepad_player_index: unsafe extern "C" fn(*mut SdlGamepadOpaque) -> c_int,
+    sdl_is_joystick_virtual: unsafe extern "C" fn(SdlJoystickId) -> bool,
     sdl_get_gamepad_axis: unsafe extern "C" fn(*mut SdlGamepadOpaque, i32) -> i16,
     sdl_get_gamepad_button: unsafe extern "C" fn(*mut SdlGamepadOpaque, i32) -> bool,
     sdl_rumble_gamepad: unsafe extern "C" fn(*mut SdlGamepadOpaque, u16, u16, u32) -> bool,
+    sdl_attach_virtual_joystick:
+        unsafe extern "C" fn(*const SdlVirtualJoystickDesc) -> SdlJoystickId,
+    sdl_detach_virtual_joystick: unsafe extern "C" fn(SdlJoystickId) -> bool,
+    sdl_get_joystick_from_id: unsafe extern "C" fn(SdlJoystickId) -> *mut SdlJoystickOpaque,
+    sdl_set_joystick_virtual_axis:
+        unsafe extern "C" fn(*mut SdlJoystickOpaque, c_int, i16) -> bool,
+    sdl_set_joystick_virtual_button:
+        unsafe extern "C" fn(*mut SdlJoystickOpaque, c_int, bool) -> bool,
+    sdl_update_joysticks: unsafe extern "C" fn(),
     sdl_register_events: unsafe extern "C" fn(c_int) -> u32,
     sdl_push_event: unsafe extern "C" fn(*mut RawSdlEvent) -> bool,
     sdl_poll_event: unsafe extern "C" fn(*mut RawSdlEvent) -> bool,
@@ -447,9 +495,26 @@ fn load_sdl_api() -> Result<&'static SdlApi, SdlError> {
                         "SDL_GetGamepadConnectionState",
                     )?,
                     sdl_get_gamepad_power_info: resolve_sym(module, "SDL_GetGamepadPowerInfo")?,
+                    sdl_get_gamepad_player_index: resolve_sym(
+                        module,
+                        "SDL_GetGamepadPlayerIndex",
+                    )?,
+                    sdl_is_joystick_virtual: resolve_sym(module, "SDL_IsJoystickVirtual")?,
                     sdl_get_gamepad_axis: resolve_sym(module, "SDL_GetGamepadAxis")?,
                     sdl_get_gamepad_button: resolve_sym(module, "SDL_GetGamepadButton")?,
                     sdl_rumble_gamepad: resolve_sym(module, "SDL_RumbleGamepad")?,
+                    sdl_attach_virtual_joystick: resolve_sym(module, "SDL_AttachVirtualJoystick")?,
+                    sdl_detach_virtual_joystick: resolve_sym(module, "SDL_DetachVirtualJoystick")?,
+                    sdl_get_joystick_from_id: resolve_sym(module, "SDL_GetJoystickFromID")?,
+                    sdl_set_joystick_virtual_axis: resolve_sym(
+                        module,
+                        "SDL_SetJoystickVirtualAxis",
+                    )?,
+                    sdl_set_joystick_virtual_button: resolve_sym(
+                        module,
+                        "SDL_SetJoystickVirtualButton",
+                    )?,
+                    sdl_update_joysticks: resolve_sym(module, "SDL_UpdateJoysticks")?,
                     sdl_register_events: resolve_sym(module, "SDL_RegisterEvents")?,
                     sdl_push_event: resolve_sym(module, "SDL_PushEvent")?,
                     sdl_poll_event: resolve_sym(module, "SDL_PollEvent")?,
@@ -526,6 +591,8 @@ impl SdlContext {
         // Hints MUST be configured before SDL_Init so background input and HIDAPI drivers engage.
         for (name, val) in [
             ("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"),
+            ("SDL_JOYSTICK_RAWINPUT", "1"),
+            ("SDL_JOYSTICK_RAWINPUT_CORRELATE_XINPUT", "1"),
             ("SDL_JOYSTICK_HIDAPI", "1"),
             ("SDL_JOYSTICK_HIDAPI_SWITCH", "1"),
             ("SDL_JOYSTICK_HIDAPI_PS4", "1"),
@@ -769,6 +836,15 @@ impl SdlGamepad {
         }
     }
 
+    pub fn player_index(&self) -> Option<u32> {
+        let idx = unsafe { (self.api.sdl_get_gamepad_player_index)(self.ptr) };
+        if idx >= 0 { Some(idx as u32) } else { None }
+    }
+
+    pub fn is_virtual(&self) -> bool {
+        unsafe { (self.api.sdl_is_joystick_virtual)(self.id()) }
+    }
+
     pub fn axis(&self, axis: SdlGamepadAxis) -> i16 {
         unsafe { (self.api.sdl_get_gamepad_axis)(self.ptr, axis as i32) }
     }
@@ -786,6 +862,82 @@ impl Drop for SdlGamepad {
     fn drop(&mut self) {
         unsafe {
             (self.api.sdl_close_gamepad)(self.ptr);
+        }
+    }
+}
+
+/// Virtual SDL3 gamepad source used in dual-controller hardware tests without requiring a second USB/BT dongle.
+pub struct SdlVirtualGamepad {
+    api: &'static SdlApi,
+    id: SdlJoystickId,
+    _name: CString,
+}
+
+impl SdlVirtualGamepad {
+    /// Attaches a virtual SDL3 gamepad (must be called after `SdlContext::init`).
+    pub fn attach(vid: u16, pid: u16, name: &str) -> Result<Self, SdlError> {
+        #[cfg(windows)]
+        let api = load_sdl_api()?;
+        #[cfg(not(windows))]
+        return Err(SdlError::LoadLibrary(
+            "non-Windows dynamic SDL3 loader not wired in v1".into(),
+        ));
+
+        let c_name = CString::new(name)
+            .map_err(|_| SdlError::Sdl("virtual gamepad name contains interior NUL".into()))?;
+        let mut desc: SdlVirtualJoystickDesc = unsafe { std::mem::zeroed() };
+        desc.version = std::mem::size_of::<SdlVirtualJoystickDesc>() as u32;
+        desc.r#type = 1; // SDL_JOYSTICK_TYPE_GAMEPAD
+        desc.vendor_id = vid;
+        desc.product_id = pid;
+        desc.naxes = 6;
+        desc.nbuttons = 15;
+        desc.button_mask = 0x7FFF;
+        desc.axis_mask = 0x3F;
+        desc.name = c_name.as_ptr();
+
+        let id = unsafe { (api.sdl_attach_virtual_joystick)(&desc) };
+        if id == 0 {
+            return Err(SdlError::Sdl(last_sdl_error(api)));
+        }
+        Ok(Self {
+            api,
+            id,
+            _name: c_name,
+        })
+    }
+
+    pub fn joystick_id(&self) -> SdlJoystickId {
+        self.id
+    }
+
+    pub fn set_axis(&self, axis: SdlGamepadAxis, value: i16) -> bool {
+        let joy = unsafe { (self.api.sdl_get_joystick_from_id)(self.id) };
+        if joy.is_null() {
+            return false;
+        }
+        unsafe { (self.api.sdl_set_joystick_virtual_axis)(joy, axis as c_int, value) }
+    }
+
+    pub fn set_button(&self, button: SdlGamepadButton, down: bool) -> bool {
+        let joy = unsafe { (self.api.sdl_get_joystick_from_id)(self.id) };
+        if joy.is_null() {
+            return false;
+        }
+        unsafe { (self.api.sdl_set_joystick_virtual_button)(joy, button as c_int, down) }
+    }
+
+    pub fn pump(&self) {
+        unsafe {
+            (self.api.sdl_update_joysticks)();
+        }
+    }
+}
+
+impl Drop for SdlVirtualGamepad {
+    fn drop(&mut self) {
+        unsafe {
+            (self.api.sdl_detach_virtual_joystick)(self.id);
         }
     }
 }

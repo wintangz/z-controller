@@ -190,6 +190,24 @@ pub fn is_vigem_virtual_device_path(interface_path: Option<&str>) -> bool {
     is_vigem_virtual_instance(&instance_id)
 }
 
+/// Returns `true` when at least one ViGEm virtual Xbox 360 HID node (`045E:028E`) is present
+/// and zero non-ViGEm physical `045E:028E` HID nodes exist, used to suppress pathless SDL XInput loops.
+pub fn only_vigem_x360_hid_present() -> bool {
+    let hids = enumerate_hid_devices();
+    let mut saw_vigem = false;
+    let mut saw_non_vigem = false;
+    for d in hids {
+        if d.vendor_id == 0x045E && d.product_id == 0x028E {
+            if d.is_vigem_virtual {
+                saw_vigem = true;
+            } else {
+                saw_non_vigem = true;
+            }
+        }
+    }
+    saw_vigem && !saw_non_vigem
+}
+
 struct DevInfoGuard(HDEVINFO);
 impl Drop for DevInfoGuard {
     fn drop(&mut self) {
@@ -362,4 +380,20 @@ fn extract_hex_after(haystack: &str, prefix: &str) -> Option<u16> {
         return None;
     }
     u16::from_str_radix(&rest[..4], 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_instance_id_parses_hid_interface_path() {
+        let path = r"\\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&0002057e_PID&2009#9&1a2dbc92&1&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+        let id = interface_path_to_instance_id(path).unwrap();
+        assert_eq!(
+            id,
+            r"HID\{00001124-0000-1000-8000-00805F9B34FB}_VID&0002057E_PID&2009\9&1A2DBC92&1&0000"
+        );
+        assert_eq!(parse_vid_pid_from_id(&id), (0x057E, 0x2009));
+    }
 }

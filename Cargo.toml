@@ -4,6 +4,7 @@ members = [
     "crates/z-core",
     "crates/z-sdl3",
     "crates/z-platform-windows",
+    "apps/z-controller",
 ]
 
 [workspace.package]

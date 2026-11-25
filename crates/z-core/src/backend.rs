@@ -38,6 +38,9 @@ pub struct DriverStatus {
 pub trait VirtualPadHandle: Send {
     fn kind(&self) -> VirtualTargetKind;
     fn serial_no(&self) -> u32;
+    fn xinput_user_index(&self) -> Option<u32> {
+        None
+    }
     fn send_report(&self, report: &VirtualOutputReport) -> Result<(), BackendError>;
     fn rumble_receiver(&self) -> Option<&Receiver<RumbleCommand>>;
 }
@@ -205,6 +208,18 @@ impl SlotCoordinator {
     pub fn active_count(&self) -> usize {
         self.slots.len()
     }
+
+    pub fn owns_xinput_user_index(&self, idx: u32) -> bool {
+        self.slots
+            .values()
+            .any(|s| s.pad.kind() == VirtualTargetKind::Xbox360 && s.pad.xinput_user_index() == Some(idx))
+    }
+
+    pub fn has_active_x360(&self) -> bool {
+        self.slots
+            .values()
+            .any(|s| s.pad.kind() == VirtualTargetKind::Xbox360)
+    }
 }
 
 impl Default for SlotCoordinator {
@@ -230,6 +245,9 @@ mod tests {
         }
         fn serial_no(&self) -> u32 {
             self.serial
+        }
+        fn xinput_user_index(&self) -> Option<u32> {
+            (self.kind == VirtualTargetKind::Xbox360).then(|| self.serial.saturating_sub(1))
         }
         fn send_report(&self, report: &VirtualOutputReport) -> Result<(), BackendError> {
             self.sent.lock().unwrap().push(*report);
@@ -301,6 +319,9 @@ mod tests {
             .ensure_pad(&k2, VirtualTargetKind::DualShock4, None, &mut backend, Box::new(|| {}))
             .unwrap();
         assert_eq!(coord.active_count(), 2);
+        assert!(coord.has_active_x360());
+        assert!(coord.owns_xinput_user_index(0));
+        assert!(!coord.owns_xinput_user_index(1));
 
         let r1 = VirtualOutputReport::Xbox360(crate::model::X360OutputState {
             buttons: 0x1000,

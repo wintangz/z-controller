@@ -613,57 +613,64 @@ impl VigemClient {
             }
         }
 
-        let target = VigemTarget {
+        let mut xinput_user_index = None;
+        let mut target = VigemTarget {
             bus: Arc::clone(&self.bus),
             serial_no,
             kind,
+            xinput_user_index: None,
             alive: Arc::new(AtomicBool::new(true)),
             in_flight_ov: Arc::new(Mutex::new(None)),
             notify_thread: None,
         };
 
-        if !confirmed {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        if kind == VigemTargetKind::Xbox360 {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(if confirmed { 600 } else { 3000 });
             while std::time::Instant::now() < deadline {
-                let ok = match kind {
-                    VigemTargetKind::Xbox360 => {
-                        let req = XusbGetUserIndex {
-                            size: size_of::<XusbGetUserIndex>() as u32,
-                            serial_no,
-                            user_index: 0,
-                        };
-                        let mut resp = XusbGetUserIndex {
-                            size: size_of::<XusbGetUserIndex>() as u32,
-                            serial_no,
-                            user_index: 0,
-                        };
-                        unsafe {
-                            ioctl_overlapped(
-                                self.bus.handle,
-                                IOCTL_XUSB_GET_USER_INDEX,
-                                (&req as *const XusbGetUserIndex).cast(),
-                                req.size,
-                                (&mut resp as *mut XusbGetUserIndex).cast(),
-                                resp.size,
-                                500,
-                                "XUSB_GET_USER_INDEX",
-                                None,
-                            )
-                            .is_ok()
-                        }
-                    }
-                    VigemTargetKind::DualShock4 => {
-                        target.update_ds4(&Ds4Report::default()).is_ok()
-                    }
+                let req = XusbGetUserIndex {
+                    size: size_of::<XusbGetUserIndex>() as u32,
+                    serial_no,
+                    user_index: 0,
+                };
+                let mut resp = XusbGetUserIndex {
+                    size: size_of::<XusbGetUserIndex>() as u32,
+                    serial_no,
+                    user_index: 0,
+                };
+                let ok = unsafe {
+                    ioctl_overlapped(
+                        self.bus.handle,
+                        IOCTL_XUSB_GET_USER_INDEX,
+                        (&req as *const XusbGetUserIndex).cast(),
+                        req.size,
+                        (&mut resp as *mut XusbGetUserIndex).cast(),
+                        resp.size,
+                        500,
+                        "XUSB_GET_USER_INDEX",
+                        None,
+                    )
+                    .is_ok()
                 };
                 if ok {
+                    xinput_user_index = Some(resp.user_index);
                     confirmed = true;
                     break;
                 }
                 thread::sleep(std::time::Duration::from_millis(15));
             }
-            let _ = confirmed;
+        } else if !confirmed {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline {
+                if target.update_ds4(&Ds4Report::default()).is_ok() {
+                    confirmed = true;
+                    break;
+                }
+                thread::sleep(std::time::Duration::from_millis(15));
+            }
         }
+        let _ = confirmed;
+        target.xinput_user_index = xinput_user_index;
 
         Ok(target)
     }
@@ -694,6 +701,7 @@ pub struct VigemTarget {
     bus: Arc<BusHandle>,
     serial_no: u32,
     kind: VigemTargetKind,
+    xinput_user_index: Option<u32>,
     alive: Arc<AtomicBool>,
     in_flight_ov: Arc<Mutex<Option<usize>>>,
     notify_thread: Option<JoinHandle<()>>,
@@ -706,6 +714,40 @@ impl VigemTarget {
 
     pub fn serial_no(&self) -> u32 {
         self.serial_no
+    }
+
+    pub fn xinput_user_index(&self) -> Option<u32> {
+        if let Some(idx) = self.xinput_user_index {
+            return Some(idx);
+        }
+        if self.kind != VigemTargetKind::Xbox360 {
+            return None;
+        }
+        let req = XusbGetUserIndex {
+            size: size_of::<XusbGetUserIndex>() as u32,
+            serial_no: self.serial_no,
+            user_index: 0,
+        };
+        let mut resp = XusbGetUserIndex {
+            size: size_of::<XusbGetUserIndex>() as u32,
+            serial_no: self.serial_no,
+            user_index: 0,
+        };
+        let ok = unsafe {
+            ioctl_overlapped(
+                self.bus.handle,
+                IOCTL_XUSB_GET_USER_INDEX,
+                (&req as *const XusbGetUserIndex).cast(),
+                req.size,
+                (&mut resp as *mut XusbGetUserIndex).cast(),
+                resp.size,
+                250,
+                "XUSB_GET_USER_INDEX",
+                None,
+            )
+            .is_ok()
+        };
+        if ok { Some(resp.user_index) } else { None }
     }
 
     pub fn update_x360(&self, report: &X360Report) -> Result<(), VigemError> {
