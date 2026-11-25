@@ -1,10 +1,13 @@
 use std::collections::HashMap;
-use std::ptr::null;
+use std::ptr::null_mut;
+use std::slice;
 
 use egui::epaint::{ImageData, Primitive, TextureId, WHITE_UV};
 use egui::{ClippedPrimitive, Color32, TexturesDelta};
+use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, SetDIBitsToDevice,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SRCCOPY, SelectObject,
 };
 
 struct CpuTexture {
@@ -13,10 +16,84 @@ struct CpuTexture {
     pixels: Vec<[u8; 4]>, // Premultiplied sRGBA [R, G, B, A]
 }
 
+struct DibBackBuffer {
+    mem_dc: HDC,
+    bitmap: HBITMAP,
+    old_bitmap: HGDIOBJ,
+    bits: *mut u32,
+}
+
+impl DibBackBuffer {
+    fn new(hdc_ref: HDC, width: usize, height: usize) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mem_dc = unsafe { CreateCompatibleDC(hdc_ref) };
+        if mem_dc.is_null() {
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32), // Top-down DIB
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [unsafe { std::mem::zeroed() }],
+        };
+        let mut raw_bits: *mut std::ffi::c_void = null_mut();
+        let bitmap = unsafe {
+            CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &mut raw_bits, null_mut(), 0)
+        };
+        if bitmap.is_null() || raw_bits.is_null() {
+            unsafe {
+                if !bitmap.is_null() {
+                    DeleteObject(bitmap);
+                }
+                DeleteDC(mem_dc);
+            }
+            return None;
+        }
+        let old_bitmap = unsafe { SelectObject(mem_dc, bitmap) };
+        Some(Self {
+            mem_dc,
+            bitmap,
+            old_bitmap,
+            bits: raw_bits.cast::<u32>(),
+        })
+    }
+}
+
+impl Drop for DibBackBuffer {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.mem_dc.is_null() {
+                if !self.old_bitmap.is_null() {
+                    SelectObject(self.mem_dc, self.old_bitmap);
+                }
+                if !self.bitmap.is_null() {
+                    DeleteObject(self.bitmap);
+                }
+                DeleteDC(self.mem_dc);
+            }
+        }
+    }
+}
+
 pub struct SoftwarePainter {
     width: usize,
     height: usize,
-    framebuffer: Vec<u32>, // 0x00RRGGBB top-down
+    dib: Option<DibBackBuffer>,
+    fallback_fb: Vec<u32>, // Used only if headless/GDI allocation unavailable
+    static_cache: Vec<u32>,
+    static_key: u64,
     textures: HashMap<TextureId, CpuTexture>,
 }
 
@@ -25,7 +102,10 @@ impl SoftwarePainter {
         Self {
             width: 0,
             height: 0,
-            framebuffer: Vec::new(),
+            dib: None,
+            fallback_fb: Vec::new(),
+            static_cache: Vec::new(),
+            static_key: 0,
             textures: HashMap::new(),
         }
     }
@@ -33,8 +113,23 @@ impl SoftwarePainter {
     pub fn release_buffers(&mut self) {
         self.width = 0;
         self.height = 0;
-        self.framebuffer = Vec::new();
+        self.dib = None;
+        self.fallback_fb = Vec::new();
+        self.static_cache = Vec::new();
+        self.static_key = 0;
         self.textures = HashMap::new();
+    }
+
+    pub fn has_ready_backbuffer(&self, width: usize, height: usize) -> bool {
+        self.width == width
+            && self.height == height
+            && (self.dib.is_some() || self.fallback_fb.len() == width * height)
+    }
+
+    pub fn has_static_cache(&self, width: usize, height: usize, key: u64) -> bool {
+        self.has_ready_backbuffer(width, height)
+            && self.static_key == key
+            && self.static_cache.len() == width * height
     }
 
     pub fn apply_textures(&mut self, delta: &TexturesDelta) {
@@ -72,6 +167,81 @@ impl SoftwarePainter {
         }
     }
 
+    fn ensure_backbuffer(&mut self, hdc_ref: HDC, width: usize, height: usize) {
+        if self.width == width && self.height == height && (self.dib.is_some() || !self.fallback_fb.is_empty()) {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.static_cache.clear();
+        self.static_key = 0;
+        self.dib = DibBackBuffer::new(hdc_ref, width, height);
+        if self.dib.is_none() {
+            self.fallback_fb.resize(width * height, 0);
+        } else {
+            self.fallback_fb = Vec::new();
+        }
+    }
+
+    fn backbuffer_slice_mut(&mut self) -> &mut [u32] {
+        let len = self.width * self.height;
+        if let Some(d) = &self.dib {
+            unsafe { slice::from_raw_parts_mut(d.bits, len) }
+        } else {
+            &mut self.fallback_fb[..len]
+        }
+    }
+
+    pub fn save_static_cache(&mut self, key: u64) {
+        let len = self.width * self.height;
+        if len == 0 {
+            return;
+        }
+        if self.static_cache.len() != len {
+            self.static_cache.resize(len, 0);
+        }
+        let src_ptr = if let Some(d) = &self.dib {
+            d.bits as *const u32
+        } else if self.fallback_fb.len() == len {
+            self.fallback_fb.as_ptr()
+        } else {
+            return;
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_ptr, self.static_cache.as_mut_ptr(), len);
+        }
+        self.static_key = key;
+    }
+
+    /// Blits ONLY the dirty region `dirty` from the persistent DIB back buffer to `hdc`.
+    pub fn present_rect(&self, hdc: HDC, dirty: Option<RECT>) {
+        if hdc.is_null() || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (rx, ry, rw, rh) = match dirty {
+            Some(r) => {
+                let x0 = r.left.clamp(0, self.width as i32);
+                let y0 = r.top.clamp(0, self.height as i32);
+                let x1 = r.right.clamp(0, self.width as i32);
+                let y1 = r.bottom.clamp(0, self.height as i32);
+                if x1 <= x0 || y1 <= y0 {
+                    (0, 0, self.width as i32, self.height as i32)
+                } else {
+                    (x0, y0, x1 - x0, y1 - y0)
+                }
+            }
+            None => (0, 0, self.width as i32, self.height as i32),
+        };
+        if let Some(d) = &self.dib {
+            unsafe {
+                BitBlt(hdc, rx, ry, rw, rh, d.mem_dc, rx, ry, SRCCOPY);
+            }
+        }
+    }
+
+    /// Renders `primitives` into the double-buffered DIB (optionally clipped to `dirty_px`
+    /// while restoring unchanged pixels from `static_cache`) and presents once via `BitBlt`.
+    #[allow(clippy::too_many_arguments)]
     pub fn paint_and_blit(
         &mut self,
         hdc: HDC,
@@ -80,16 +250,38 @@ impl SoftwarePainter {
         pixels_per_point: f32,
         primitives: &[ClippedPrimitive],
         clear_rgb: u32,
+        dirty_px: Option<[usize; 4]>,
+        present_clip: Option<RECT>,
     ) {
         if width == 0 || height == 0 {
             return;
         }
-        if self.width != width || self.height != height || self.framebuffer.len() != width * height {
-            self.width = width;
-            self.height = height;
-            self.framebuffer.resize(width * height, clear_rgb);
-        } else {
-            self.framebuffer.fill(clear_rgb);
+        self.ensure_backbuffer(hdc, width, height);
+
+        let (bx0, by0, bx1, by1) = match dirty_px {
+            Some([x0, y0, x1, y1]) if x0 < x1 && y0 < y1 => (
+                x0.min(width),
+                y0.min(height),
+                x1.min(width),
+                y1.min(height),
+            ),
+            _ => (0, 0, width, height),
+        };
+        if bx0 >= bx1 || by0 >= by1 {
+            return;
+        }
+
+        // Clear dirty region in backbuffer (row-slice fill)
+        {
+            let fb = self.backbuffer_slice_mut();
+            if bx0 == 0 && bx1 == width && by0 == 0 && by1 == height {
+                fb.fill(clear_rgb);
+            } else {
+                for py in by0..by1 {
+                    let off = py * width;
+                    fb[off + bx0..off + bx1].fill(clear_rgb);
+                }
+            }
         }
 
         for cp in primitives {
@@ -106,67 +298,188 @@ impl SoftwarePainter {
                 .ceil()
                 .clamp(0.0, height as f32) as usize;
 
-            if clip_min_x >= clip_max_x || clip_min_y >= clip_max_y {
+            let cmin_x = clip_min_x.max(bx0);
+            let cmin_y = clip_min_y.max(by0);
+            let cmax_x = clip_max_x.min(bx1);
+            let cmax_y = clip_max_y.min(by1);
+            if cmin_x >= cmax_x || cmin_y >= cmax_y {
                 continue;
             }
 
             if let Primitive::Mesh(mesh) = &cp.primitive {
-                let tex = self.textures.get(&mesh.texture_id);
-                for tri in mesh.indices.chunks_exact(3) {
-                    let v0 = &mesh.vertices[tri[0] as usize];
-                    let v1 = &mesh.vertices[tri[1] as usize];
-                    let v2 = &mesh.vertices[tri[2] as usize];
+                let has_tex = self.textures.contains_key(&mesh.texture_id);
+                let len = width * height;
+                let fb = if let Some(d) = &self.dib {
+                    unsafe { slice::from_raw_parts_mut(d.bits, len) }
+                } else {
+                    &mut self.fallback_fb[..len]
+                };
+
+                // Axis-aligned flat-solid quad fast path (panels, rects, dividers, fills)
+                let mut i = 0usize;
+                while i + 6 <= mesh.indices.len() {
+                    let t0 = &mesh.indices[i..i + 6];
+                    if let Some((qx0, qy0, qx1, qy1, col)) =
+                        detect_solid_quad(&mesh.vertices, t0, pixels_per_point)
+                    {
+                        fill_solid_rect(fb, width, cmin_x, cmin_y, cmax_x, cmax_y, qx0, qy0, qx1, qy1, col);
+                        i += 6;
+                    } else {
+                        let tex = if has_tex {
+                            self.textures.get(&mesh.texture_id)
+                        } else {
+                            None
+                        };
+                        for k in 0..2 {
+                            let tri = &mesh.indices[i + k * 3..i + k * 3 + 3];
+                            rasterize_triangle(
+                                fb,
+                                width,
+                                cmin_x,
+                                cmin_y,
+                                cmax_x,
+                                cmax_y,
+                                pixels_per_point,
+                                &mesh.vertices[tri[0] as usize],
+                                &mesh.vertices[tri[1] as usize],
+                                &mesh.vertices[tri[2] as usize],
+                                tex,
+                            );
+                        }
+                        i += 6;
+                    }
+                }
+                while i + 3 <= mesh.indices.len() {
+                    let tex = if has_tex {
+                        self.textures.get(&mesh.texture_id)
+                    } else {
+                        None
+                    };
+                    let tri = &mesh.indices[i..i + 3];
                     rasterize_triangle(
-                        &mut self.framebuffer,
+                        fb,
                         width,
-                        clip_min_x,
-                        clip_min_y,
-                        clip_max_x,
-                        clip_max_y,
+                        cmin_x,
+                        cmin_y,
+                        cmax_x,
+                        cmax_y,
                         pixels_per_point,
-                        v0,
-                        v1,
-                        v2,
+                        &mesh.vertices[tri[0] as usize],
+                        &mesh.vertices[tri[1] as usize],
+                        &mesh.vertices[tri[2] as usize],
                         tex,
                     );
+                    i += 3;
                 }
             }
         }
 
-        let bmi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32), // Top-down DIB
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [unsafe { std::mem::zeroed() }],
-        };
+        let blit_rect = present_clip.or_else(|| {
+            if bx0 < bx1 && by0 < by1 {
+                Some(RECT {
+                    left: bx0 as i32,
+                    top: by0 as i32,
+                    right: bx1 as i32,
+                    bottom: by1 as i32,
+                })
+            } else {
+                None
+            }
+        });
+        self.present_rect(hdc, blit_rect);
+    }
+}
 
-        unsafe {
-            SetDIBitsToDevice(
-                hdc,
-                0,
-                0,
-                width as u32,
-                height as u32,
-                0,
-                0,
-                0,
-                height as u32,
-                self.framebuffer.as_ptr().cast(),
-                &bmi,
-                DIB_RGB_COLORS,
-            );
+#[inline]
+fn detect_solid_quad(
+    verts: &[egui::epaint::Vertex],
+    idx6: &[u32],
+    ppp: f32,
+) -> Option<(usize, usize, usize, usize, [u8; 4])> {
+    let v0 = &verts[idx6[0] as usize];
+    if v0.uv != WHITE_UV {
+        return None;
+    }
+    let c = v0.color.to_array();
+    let mut xs = [f32::INFINITY, f32::NEG_INFINITY];
+    let mut ys = [f32::INFINITY, f32::NEG_INFINITY];
+    for &idx in idx6 {
+        let v = &verts[idx as usize];
+        if v.uv != WHITE_UV || v.color.to_array() != c {
+            return None;
         }
-        let _ = null::<u8>();
+        xs[0] = xs[0].min(v.pos.x);
+        xs[1] = xs[1].max(v.pos.x);
+        ys[0] = ys[0].min(v.pos.y);
+        ys[1] = ys[1].max(v.pos.y);
+    }
+    for &idx in idx6 {
+        let v = &verts[idx as usize];
+        let on_x = (v.pos.x - xs[0]).abs() < 1e-3 || (v.pos.x - xs[1]).abs() < 1e-3;
+        let on_y = (v.pos.y - ys[0]).abs() < 1e-3 || (v.pos.y - ys[1]).abs() < 1e-3;
+        if !(on_x && on_y) {
+            return None;
+        }
+    }
+    let px0 = (xs[0] * ppp).round().max(0.0) as usize;
+    let py0 = (ys[0] * ppp).round().max(0.0) as usize;
+    let px1 = (xs[1] * ppp).round().max(0.0) as usize;
+    let py1 = (ys[1] * ppp).round().max(0.0) as usize;
+    if px1 <= px0 || py1 <= py0 {
+        return None;
+    }
+    Some((px0, py0, px1, py1, c))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn fill_solid_rect(
+    fb: &mut [u32],
+    fb_w: usize,
+    clip_min_x: usize,
+    clip_min_y: usize,
+    clip_max_x: usize,
+    clip_max_y: usize,
+    rx0: usize,
+    ry0: usize,
+    rx1: usize,
+    ry1: usize,
+    src: [u8; 4],
+) {
+    if src[3] == 0 {
+        return;
+    }
+    let x0 = rx0.max(clip_min_x);
+    let y0 = ry0.max(clip_min_y);
+    let x1 = rx1.min(clip_max_x);
+    let y1 = ry1.min(clip_max_y);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    if src[3] == 255 {
+        let packed = ((src[0] as u32) << 16) | ((src[1] as u32) << 8) | (src[2] as u32);
+        for py in y0..y1 {
+            let row = py * fb_w;
+            fb[row + x0..row + x1].fill(packed);
+        }
+    } else {
+        let sr = src[0] as u32;
+        let sg = src[1] as u32;
+        let sb = src[2] as u32;
+        let inv_a = 255 - src[3] as u32;
+        for py in y0..y1 {
+            let row = py * fb_w;
+            for dst in &mut fb[row + x0..row + x1] {
+                let d = *dst;
+                let dr = (d >> 16) & 0xFF;
+                let dg = (d >> 8) & 0xFF;
+                let db = d & 0xFF;
+                let r = (sr + ((dr * inv_a + 127) / 255)).min(255);
+                let g = (sg + ((dg * inv_a + 127) / 255)).min(255);
+                let b = (sb + ((db * inv_a + 127) / 255)).min(255);
+                *dst = (r << 16) | (g << 8) | b;
+            }
+        }
     }
 }
 
@@ -340,7 +653,6 @@ fn sample_bilinear(tex: &CpuTexture, u: f32, v: f32) -> [u8; 4] {
 mod tests {
     use super::*;
     use egui::{Pos2, RawInput, Rect, Vec2, ViewportId};
-    use std::ptr::null_mut;
 
     fn render_sample_text(ppp: f32, width: usize, height: usize) -> (f32, Vec<u32>) {
         let ctx = egui::Context::default();
@@ -373,8 +685,11 @@ mod tests {
             full_out.pixels_per_point,
             &clipped,
             0x000A_0A10,
+            None,
+            None,
         );
-        (full_out.pixels_per_point, painter.framebuffer.clone())
+        let pixels = painter.backbuffer_slice_mut().to_vec();
+        (full_out.pixels_per_point, pixels)
     }
 
     #[test]
@@ -393,5 +708,26 @@ mod tests {
             lit_150 * 10 > lit_100 * 17,
             "expected 150% DPI rendered pixel area ({lit_150}) to scale cleanly over 100% ({lit_100})"
         );
+    }
+
+    #[test]
+    fn static_cache_and_dirty_rect_clipping_preserve_pixels() {
+        let ctx = egui::Context::default();
+        let mut painter = SoftwarePainter::new();
+        let raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0))),
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |c| {
+            egui::CentralPanel::default().show(c, |ui| {
+                ui.label("Cached Chrome");
+            });
+        });
+        painter.apply_textures(&out.textures_delta);
+        let clipped = ctx.tessellate(out.shapes, 1.0);
+        painter.paint_and_blit(null_mut(), 300, 200, 1.0, &clipped, 0x000A_0A10, None, None);
+        painter.save_static_cache(42);
+        assert!(painter.has_static_cache(300, 200, 42));
+        assert!(!painter.has_static_cache(300, 200, 99));
     }
 }

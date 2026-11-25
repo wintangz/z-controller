@@ -20,26 +20,30 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
-    GetMessageW, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW, LoadCursorW, MF_STRING, MSG,
-    PM_REMOVE, PeekMessageW, PostMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TrackPopupMenu,
-    TranslateMessage, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_ENDSESSION, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_MOUSEMOVE,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_MAXIMIZEBOX,
-    WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
+    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW, IMAGE_ICON,
+    LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MF_STRING, MSG, PM_REMOVE, PeekMessageW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXICON, SM_CXSMICON, SM_CYICON,
+    SM_CYSMICON, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TrackPopupMenu, TranslateMessage, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY,
+    WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW,
+    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
 };
 
 use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
 use crate::ui::{
     AppUiState, UiAction, configure_neon_theme_and_fonts, draw_compact_main_snapshot,
-    draw_compact_main_ui, draw_profile_editor_snapshot, draw_profile_editor_ui,
+    draw_profile_editor_snapshot, static_ui_hash,
 };
 
 const WM_TRAYICON: u32 = 0x8000 + 2;
 const WM_APP_IMMEDIATE_REPAINT: u32 = 0x8000 + 3;
 const WM_DPICHANGED: u32 = 0x02E0;
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_ENTERSIZEMOVE: u32 = 0x0231;
+const WM_EXITSIZEMOVE: u32 = 0x0232;
 const CMD_OPEN: usize = 1001;
 const CMD_QUIT: usize = 1002;
 const CLEAR_BG_RGB: u32 = 0x000A_0A10;
@@ -194,7 +198,8 @@ struct AppShared {
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     start_time: Instant,
     hinstance: HINSTANCE,
-    tray_icon: HICON,
+    large_icon: HICON,
+    small_icon: HICON,
     main_hwnd: Mutex<usize>,
     editor_hwnd: Mutex<usize>,
 }
@@ -211,6 +216,33 @@ struct WindowHostState {
     pixels_per_point: f32,
     visible: bool,
     followup_paint_budget: u8,
+    in_size_move: bool,
+    pending_state_refresh: bool,
+    needs_redraw: bool,
+    dirty_only_rect: Option<RECT>,
+}
+
+fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
+    let cx_lg = unsafe { GetSystemMetrics(SM_CXICON) }.max(32);
+    let cy_lg = unsafe { GetSystemMetrics(SM_CYICON) }.max(32);
+    let cx_sm = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    let cy_sm = unsafe { GetSystemMetrics(SM_CYSMICON) }.max(16);
+
+    let res_id = 1usize as *const u16;
+    let large = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_lg, cy_lg, LR_DEFAULTCOLOR) }
+        as HICON;
+    let small = unsafe { LoadImageW(hinstance, res_id, IMAGE_ICON, cx_sm, cy_sm, LR_DEFAULTCOLOR) }
+        as HICON;
+
+    if !large.is_null() && !small.is_null() {
+        (large, small)
+    } else {
+        let fb = unsafe { create_gamepad_icon() };
+        (
+            if large.is_null() { fb } else { large },
+            if small.is_null() { fb } else { small },
+        )
+    }
 }
 
 pub fn run_tray_app(
@@ -225,7 +257,7 @@ pub fn run_tray_app(
     let class_name: Vec<u16> = "ZControllerTrayHost\0".encode_utf16().collect();
     let title: Vec<u16> = "z-controller\0".encode_utf16().collect();
 
-    let tray_icon = unsafe { create_gamepad_icon() };
+    let (large_icon, small_icon) = load_app_icons(hinstance);
 
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -234,12 +266,12 @@ pub fn run_tray_app(
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance,
-        hIcon: tray_icon,
+        hIcon: large_icon,
         hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
         hbrBackground: null_mut(),
         lpszMenuName: null(),
         lpszClassName: class_name.as_ptr(),
-        hIconSm: tray_icon,
+        hIconSm: small_icon,
     };
     if unsafe { RegisterClassExW(&wc) } == 0 {
         return Err("RegisterClassExW failed".into());
@@ -251,7 +283,8 @@ pub fn run_tray_app(
         preview_controllers,
         start_time: Instant::now(),
         hinstance,
-        tray_icon,
+        large_icon,
+        small_icon,
         main_hwnd: Mutex::new(0),
         editor_hwnd: Mutex::new(0),
     });
@@ -277,6 +310,10 @@ pub fn run_tray_app(
         pixels_per_point: dpi_to_ppp(init_dpi),
         visible: show_main,
         followup_paint_budget: 0,
+        in_size_move: false,
+        pending_state_refresh: false,
+        needs_redraw: true,
+        dirty_only_rect: None,
     });
     let main_state_ptr = Box::into_raw(main_state);
 
@@ -319,7 +356,7 @@ pub fn run_tray_app(
         eng.set_window_visible(show_main);
     }
 
-    add_tray_icon(hwnd, tray_icon);
+    add_tray_icon(hwnd, small_icon);
 
     if show_main {
         apply_dark_titlebar(hwnd);
@@ -392,8 +429,11 @@ pub fn run_tray_app(
 
     remove_tray_icon(hwnd);
     unsafe {
-        if !shared.tray_icon.is_null() {
-            DestroyIcon(shared.tray_icon);
+        if !shared.small_icon.is_null() {
+            DestroyIcon(shared.small_icon);
+        }
+        if !shared.large_icon.is_null() {
+            DestroyIcon(shared.large_icon);
         }
         shared
             .engine
@@ -404,7 +444,11 @@ pub fn run_tray_app(
     Ok(())
 }
 
-fn ensure_editor_class_registered(hinstance: HINSTANCE, icon: HICON) -> Vec<u16> {
+fn ensure_editor_class_registered(
+    hinstance: HINSTANCE,
+    large_icon: HICON,
+    small_icon: HICON,
+) -> Vec<u16> {
     let class_name: Vec<u16> = "ZControllerEditorHost\0".encode_utf16().collect();
     REGISTER_EDITOR_CLASS.call_once(|| {
         let wc = WNDCLASSEXW {
@@ -414,12 +458,12 @@ fn ensure_editor_class_registered(hinstance: HINSTANCE, icon: HICON) -> Vec<u16>
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinstance,
-            hIcon: icon,
+            hIcon: large_icon,
             hCursor: unsafe { LoadCursorW(null_mut(), IDC_ARROW) },
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class_name.as_ptr(),
-            hIconSm: icon,
+            hIconSm: small_icon,
         };
         unsafe { RegisterClassExW(&wc) };
     });
@@ -453,7 +497,11 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
 
     let mut ed_hwnd_guard = shared.editor_hwnd.lock().unwrap_or_else(|e| e.into_inner());
     let ed_hwnd = if *ed_hwnd_guard == 0 {
-        let class_name = ensure_editor_class_registered(shared.hinstance, shared.tray_icon);
+        let class_name = ensure_editor_class_registered(
+            shared.hinstance,
+            shared.large_icon,
+            shared.small_icon,
+        );
         let title: Vec<u16> = "z-controller - Profile Editor\0".encode_utf16().collect();
         let main_hwnd_val = *shared.main_hwnd.lock().unwrap_or_else(|e| e.into_inner()) as HWND;
         let init_dpi = get_dpi_for_window(main_hwnd_val);
@@ -475,6 +523,10 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             pixels_per_point: dpi_to_ppp(init_dpi),
             visible: true,
             followup_paint_budget: 2,
+            in_size_move: false,
+            pending_state_refresh: false,
+            needs_redraw: true,
+            dirty_only_rect: None,
         });
         let ed_ptr = Box::into_raw(ed_state);
         let created = unsafe {
@@ -547,6 +599,8 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
         }
         st.visible = true;
         st.followup_paint_budget = 2;
+        st.needs_redraw = true;
+        st.dirty_only_rect = None;
     }
 
     {
@@ -626,13 +680,40 @@ unsafe extern "system" fn wnd_proc(
     }
 
     match msg {
+        WM_ERASEBKGND => 1,
+        WM_ENTERSIZEMOVE => {
+            let st = unsafe { &mut *state_ptr };
+            st.in_size_move = true;
+            0
+        }
+        WM_EXITSIZEMOVE => {
+            let st = unsafe { &mut *state_ptr };
+            st.in_size_move = false;
+            if st.pending_state_refresh {
+                st.pending_state_refresh = false;
+                st.needs_redraw = true;
+                let dirty = st.dirty_only_rect;
+                if let Some(ref r) = dirty {
+                    unsafe { InvalidateRect(hwnd, r, 0) };
+                } else {
+                    unsafe { InvalidateRect(hwnd, null(), 0) };
+                }
+            }
+            0
+        }
         WM_SIZE => {
             let mut rc: RECT = unsafe { std::mem::zeroed() };
             unsafe { GetClientRect(hwnd, &mut rc) };
             let st = unsafe { &mut *state_ptr };
-            st.width = (rc.right - rc.left).max(0) as usize;
-            st.height = (rc.bottom - rc.top).max(0) as usize;
-            unsafe { InvalidateRect(hwnd, null(), 0) };
+            let new_w = (rc.right - rc.left).max(0) as usize;
+            let new_h = (rc.bottom - rc.top).max(0) as usize;
+            if new_w != st.width || new_h != st.height {
+                st.width = new_w;
+                st.height = new_h;
+                st.needs_redraw = true;
+                st.dirty_only_rect = None;
+                unsafe { InvalidateRect(hwnd, null(), 0) };
+            }
             0
         }
         WM_DPICHANGED => {
@@ -643,6 +724,8 @@ unsafe extern "system" fn wnd_proc(
                 st.dpi = new_dpi;
                 st.pixels_per_point = new_ppp;
                 st.followup_paint_budget = 2;
+                st.needs_redraw = true;
+                st.dirty_only_rect = None;
                 st.role
             };
             // Drop &mut before SetWindowPos so any synchronous WM_SIZE does not alias state_ptr.
@@ -683,21 +766,65 @@ unsafe extern "system" fn wnd_proc(
                 let st = unsafe { &mut *state_ptr };
                 st.width = (crc.right - crc.left).max(0) as usize;
                 st.height = (crc.bottom - crc.top).max(0) as usize;
+                st.needs_redraw = true;
+                st.dirty_only_rect = None;
             }
             unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
         WM_APP_STATE_CHANGED => {
             let st = unsafe { &mut *state_ptr };
-            if st.visible {
-                st.followup_paint_budget = 1;
-                unsafe { InvalidateRect(hwnd, null(), 0) };
+            if !st.visible {
+                return 0;
             }
+            if st.in_size_move {
+                // Defer live-highlight updates during window drags so dragging stays zero-jank.
+                st.pending_state_refresh = true;
+                return 0;
+            }
+            let shared = Arc::clone(&st.shared);
+            let eng = shared.engine.lock().unwrap_or_else(|e| e.into_inner());
+            let ui_state = shared.ui_state.lock().unwrap_or_else(|e| e.into_inner());
+            let snap = eng.snapshot();
+            let static_key = static_ui_hash(&snap, &ui_state);
+            let dyn_rect_opt = match st.role {
+                WindowRole::Main => ui_state.last_dynamic_rect_main,
+                WindowRole::Editor => ui_state.last_dynamic_rect_editor,
+            };
+            drop(ui_state);
+            drop(eng);
+
+            st.needs_redraw = true;
+            st.followup_paint_budget = 1;
+
+            let can_partial = st
+                .ui_session
+                .as_ref()
+                .is_some_and(|(_, p)| p.has_static_cache(st.width, st.height, static_key));
+            if can_partial {
+                if let Some(lr) = dyn_rect_opt {
+                    let ppp = st.pixels_per_point.max(0.5);
+                    let phys = RECT {
+                        left: ((lr.left() * ppp).floor() as i32 - 2).max(0),
+                        top: ((lr.top() * ppp).floor() as i32 - 2).max(0),
+                        right: ((lr.right() * ppp).ceil() as i32 + 2).min(st.width as i32),
+                        bottom: ((lr.bottom() * ppp).ceil() as i32 + 2).min(st.height as i32),
+                    };
+                    if phys.right > phys.left && phys.bottom > phys.top {
+                        st.dirty_only_rect = Some(phys);
+                        unsafe { InvalidateRect(hwnd, &phys, 0) };
+                        return 0;
+                    }
+                }
+            }
+            st.dirty_only_rect = None;
+            unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
         WM_APP_IMMEDIATE_REPAINT => {
-            let visible = unsafe { (*state_ptr).visible };
-            if visible {
+            let st = unsafe { &mut *state_ptr };
+            if st.visible {
+                st.needs_redraw = true;
                 unsafe {
                     InvalidateRect(hwnd, null(), 0);
                     UpdateWindow(hwnd);
@@ -713,6 +840,21 @@ unsafe extern "system" fn wnd_proc(
             let mut request_followup = false;
 
             if st.visible && st.width > 0 && st.height > 0 {
+                let backbuffer_ready = st
+                    .ui_session
+                    .as_ref()
+                    .is_some_and(|(_, p)| p.has_ready_backbuffer(st.width, st.height));
+
+                // Fast path: during drag or OS expose repaints when nothing UI-side changed,
+                // blit the cached DIB back buffer in one BitBlt without invoking egui or rasterizing.
+                if backbuffer_ready && (st.in_size_move || (!st.needs_redraw && st.events.is_empty())) {
+                    if let Some((_, painter)) = st.ui_session.as_ref() {
+                        painter.present_rect(hdc, Some(ps.rcPaint));
+                    }
+                    unsafe { EndPaint(hwnd, &ps) };
+                    return 0;
+                }
+
                 let shared = Arc::clone(&st.shared);
                 let eng = shared.engine.lock().unwrap_or_else(|e| e.into_inner());
                 let mut ui_state = shared.ui_state.lock().unwrap_or_else(|e| e.into_inner());
@@ -746,38 +888,42 @@ unsafe extern "system" fn wnd_proc(
                     .native_pixels_per_point = Some(ppp);
                 let preview_list = shared.preview_controllers.as_ref();
                 let role = st.role;
+                let snap_for_hash = eng.snapshot();
                 let full_out = egui_ctx.run(raw, |ctx| match (role, preview_list) {
                     (WindowRole::Main, Some(preview)) => {
-                        let base = eng.snapshot();
                         let snap = EngineSnapshot {
                             controllers: preview.clone(),
-                            config: base.config.clone(),
-                            driver_status: base.driver_status.clone(),
-                            last_status_message: base.last_status_message.clone(),
+                            config: snap_for_hash.config.clone(),
+                            driver_status: snap_for_hash.driver_status.clone(),
+                            last_status_message: snap_for_hash.last_status_message.clone(),
                         };
                         actions = draw_compact_main_snapshot(ctx, &mut ui_state, &snap, |cmd| {
                             eng.send(cmd)
                         });
                     }
                     (WindowRole::Main, None) => {
-                        actions = draw_compact_main_ui(ctx, &mut ui_state, &eng);
+                        actions = draw_compact_main_snapshot(ctx, &mut ui_state, &snap_for_hash, |cmd| {
+                            eng.send(cmd)
+                        });
                     }
                     (WindowRole::Editor, Some(preview)) => {
-                        let base = eng.snapshot();
                         let snap = EngineSnapshot {
                             controllers: preview.clone(),
-                            config: base.config.clone(),
-                            driver_status: base.driver_status.clone(),
-                            last_status_message: base.last_status_message.clone(),
+                            config: snap_for_hash.config.clone(),
+                            driver_status: snap_for_hash.driver_status.clone(),
+                            last_status_message: snap_for_hash.last_status_message.clone(),
                         };
                         draw_profile_editor_snapshot(ctx, &mut ui_state, &snap, |cmd| {
                             eng.send(cmd)
                         });
                     }
                     (WindowRole::Editor, None) => {
-                        draw_profile_editor_ui(ctx, &mut ui_state, &eng);
+                        draw_profile_editor_snapshot(ctx, &mut ui_state, &snap_for_hash, |cmd| {
+                            eng.send(cmd)
+                        });
                     }
                 });
+                let static_key = static_ui_hash(&snap_for_hash, &ui_state);
                 drop(ui_state);
                 drop(eng);
 
@@ -795,7 +941,37 @@ unsafe extern "system" fn wnd_proc(
                 painter.apply_textures(&full_out.textures_delta);
                 let render_ppp = full_out.pixels_per_point;
                 let clipped = egui_ctx.tessellate(full_out.shapes, render_ppp);
-                painter.paint_and_blit(hdc, width, height, render_ppp, &clipped, CLEAR_BG_RGB);
+
+                let dirty_px = st.dirty_only_rect.take().and_then(|r| {
+                    if painter.has_static_cache(width, height, static_key)
+                        && r.right > r.left
+                        && r.bottom > r.top
+                    {
+                        Some([
+                            r.left.max(0) as usize,
+                            r.top.max(0) as usize,
+                            (r.right as usize).min(width),
+                            (r.bottom as usize).min(height),
+                        ])
+                    } else {
+                        None
+                    }
+                });
+                let is_full_paint = dirty_px.is_none();
+                painter.paint_and_blit(
+                    hdc,
+                    width,
+                    height,
+                    render_ppp,
+                    &clipped,
+                    CLEAR_BG_RGB,
+                    dirty_px,
+                    Some(ps.rcPaint),
+                );
+                if is_full_paint {
+                    painter.save_static_cache(static_key);
+                }
+                st.needs_redraw = false;
             }
             unsafe { EndPaint(hwnd, &ps) };
 
@@ -827,6 +1003,8 @@ unsafe extern "system" fn wnd_proc(
             let st = unsafe { &mut *state_ptr };
             let pos = physical_to_logical_pos(x, y, st.pixels_per_point);
             st.events.push(Event::PointerMoved(pos));
+            st.needs_redraw = true;
+            st.dirty_only_rect = None;
             unsafe { InvalidateRect(hwnd, null(), 0) };
             0
         }
@@ -847,6 +1025,8 @@ unsafe extern "system" fn wnd_proc(
                 let st = &mut *state_ptr;
                 let pos = physical_to_logical_pos(x, y, st.pixels_per_point);
                 st.followup_paint_budget = 2;
+                st.needs_redraw = true;
+                st.dirty_only_rect = None;
                 st.events.push(Event::PointerButton {
                     pos,
                     button,
@@ -864,6 +1044,8 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEWHEEL => {
             let delta_raw = ((wparam >> 16) as i16) as f32 / 120.0;
             let st = unsafe { &mut *state_ptr };
+            st.needs_redraw = true;
+            st.dirty_only_rect = None;
             st.events.push(Event::MouseWheel {
                 unit: MouseWheelUnit::Line,
                 delta: Vec2::new(0.0, delta_raw * 2.5),
@@ -876,6 +1058,8 @@ unsafe extern "system" fn wnd_proc(
             if let Some(key) = vk_to_egui_key(wparam as u32) {
                 let st = unsafe { &mut *state_ptr };
                 st.followup_paint_budget = 2;
+                st.needs_redraw = true;
+                st.dirty_only_rect = None;
                 st.events.push(Event::Key {
                     key,
                     physical_key: Some(key),
@@ -891,6 +1075,8 @@ unsafe extern "system" fn wnd_proc(
             if let Some(ch) = char::from_u32(wparam as u32) {
                 if !ch.is_control() {
                     let st = unsafe { &mut *state_ptr };
+                    st.needs_redraw = true;
+                    st.dirty_only_rect = None;
                     st.events.push(Event::Text(ch.to_string()));
                     unsafe { InvalidateRect(hwnd, null(), 0) };
                 }
@@ -1006,6 +1192,8 @@ fn show_main_window(hwnd: HWND, st: &mut WindowHostState) {
     }
     st.visible = true;
     st.followup_paint_budget = 1;
+    st.needs_redraw = true;
+    st.dirty_only_rect = None;
     st.shared
         .engine
         .lock()

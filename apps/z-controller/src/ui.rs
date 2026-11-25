@@ -55,6 +55,8 @@ pub struct AppUiState {
     pub draft_profile: Option<Profile>,
     pub draft_dirty: bool,
     pub selected_diagram_button: Option<LogicalButton>,
+    pub last_dynamic_rect_main: Option<Rect>,
+    pub last_dynamic_rect_editor: Option<Rect>,
 }
 
 impl Default for AppUiState {
@@ -65,8 +67,63 @@ impl Default for AppUiState {
             draft_profile: None,
             draft_dirty: false,
             selected_diagram_button: Some(LogicalButton::South),
+            last_dynamic_rect_main: None,
+            last_dynamic_rect_editor: None,
         }
     }
+}
+
+/// Computes a deterministic hash of all static (non-live-input) UI state so
+/// engine snapshots that only update `physical_state` / `virtual_output` can
+/// reuse cached static chrome and invalidate only the dynamic input region.
+pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut h = DefaultHasher::new();
+    ui.selected_controller.hash(&mut h);
+    ui.editing_profile_id.hash(&mut h);
+    ui.draft_dirty.hash(&mut h);
+    ui.selected_diagram_button.hash(&mut h);
+
+    if let Some(p) = &ui.draft_profile {
+        p.id.hash(&mut h);
+        p.name.hash(&mut h);
+        (p.family as u8).hash(&mut h);
+        (p.target as u8).hash(&mut h);
+        p.cloak_physical.hash(&mut h);
+        (p.disconnect_policy as u8).hash(&mut h);
+        p.swap_ab_xy.hash(&mut h);
+        p.rumble_enabled.hash(&mut h);
+        p.left_deadzone.to_bits().hash(&mut h);
+        p.right_deadzone.to_bits().hash(&mut h);
+        for (k, v) in &p.button_remap {
+            (*k as u8).hash(&mut h);
+            v.map(|b| b as u8).hash(&mut h);
+        }
+    }
+
+    snap.driver_status.vigem_installed.hash(&mut h);
+    snap.driver_status.hidhide_installed.hash(&mut h);
+    snap.driver_status.hidhide_accessible.hash(&mut h);
+    snap.driver_status.reboot_recommended.hash(&mut h);
+    snap.last_status_message.hash(&mut h);
+    snap.config.default_profile_id.hash(&mut h);
+    snap.config.profiles.len().hash(&mut h);
+
+    for c in &snap.controllers {
+        c.canonical_id.hash(&mut h);
+        c.connected.hash(&mut h);
+        c.enabled.hash(&mut h);
+        c.profile_id.hash(&mut h);
+        (c.target_kind as u8).hash(&mut h);
+        c.cloaked.hash(&mut h);
+        c.virtual_active.hash(&mut h);
+        c.battery.percent.hash(&mut h);
+        (c.battery.status as u8).hash(&mut h);
+        c.present_buttons_mask.hash(&mut h);
+    }
+    h.finish()
 }
 
 pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
@@ -323,6 +380,7 @@ fn draw_battery_bar(ui: &mut egui::Ui, battery: &z_core::battery::BatteryReading
     });
 }
 
+#[allow(dead_code)]
 pub fn draw_compact_main_ui(
     ctx: &egui::Context,
     state: &mut AppUiState,
@@ -348,6 +406,7 @@ pub fn draw_compact_main_snapshot(
         state.selected_controller = snap.controllers.first().map(|c| c.canonical_id.clone());
     }
 
+    state.last_dynamic_rect_main = None;
     // Bottom status bar (driver readiness, HidHide lock warnings, live RAM readout — NO popups)
     egui::TopBottomPanel::bottom("compact_status_bar")
         .exact_height(36.0)
@@ -573,12 +632,20 @@ pub fn draw_compact_main_snapshot(
                                         }
                                     });
 
-                                    draw_card_live_status(
-                                        ui,
-                                        ctrl.family,
-                                        ctrl.present_buttons_mask,
-                                        &ctrl.physical_state,
-                                        card_inner_w,
+                                    let live_resp = ui.scope(|ui| {
+                                        draw_card_live_status(
+                                            ui,
+                                            ctrl.family,
+                                            ctrl.present_buttons_mask,
+                                            &ctrl.physical_state,
+                                            card_inner_w,
+                                        );
+                                    });
+                                    let lr = live_resp.response.rect;
+                                    state.last_dynamic_rect_main = Some(
+                                        state
+                                            .last_dynamic_rect_main
+                                            .map_or(lr, |prev| prev.union(lr)),
                                     );
                                 });
 
@@ -599,6 +666,7 @@ pub fn draw_compact_main_snapshot(
     actions
 }
 
+#[allow(dead_code)]
 pub fn draw_profile_editor_ui(
     ctx: &egui::Context,
     state: &mut AppUiState,
@@ -886,13 +954,14 @@ pub fn draw_profile_editor_snapshot(
                             });
 
                         let phys_ref = live_ctrl.as_ref().map(|c| &c.physical_state);
-                        draw_controller_diagram(
+                        let diag_rect = draw_controller_diagram(
                             ui,
                             prof.family,
                             prof,
                             phys_ref,
                             &mut state.selected_diagram_button,
                         );
+                        state.last_dynamic_rect_editor = Some(diag_rect.expand(4.0));
 
                         // Selected Input quick-remap bar synced directly with diagram click
                         let sel_btn = state
