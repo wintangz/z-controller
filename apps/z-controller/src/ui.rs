@@ -618,6 +618,7 @@ pub fn draw_compact_main_snapshot(
         )
         .show(ctx, |ui| {
             ui.set_min_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("Controllers").color(pal.text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -630,11 +631,9 @@ pub fn draw_compact_main_snapshot(
                     }
                 });
             });
-            ui.add_space(SPACE_XS);
-            let bounds = ui.available_rect_before_wrap();
-            draw_aligned_divider(ui, bounds.left(), bounds.right(), &pal);
 
             if snap.controllers.is_empty() {
+                ui.add_space(SPACE_XS + 2.0);
                 let empty_resp = egui::Frame::none()
                     .fill(pal.panel)
                     .rounding(CARD_ROUNDING)
