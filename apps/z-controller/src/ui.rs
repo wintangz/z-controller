@@ -16,17 +16,23 @@ use crate::engine::{
     EngineCommand, EngineHandle, EngineSnapshot, PhysicalSnapshot,
 };
 
-// Modern neon-on-black palette (neon strictly for accents, edges, bars, and dots — never large fills or body text).
+// Modern WT logo-on-black palette (accents strictly for accents, edges, bars, and dots — never large fills or body text).
 pub const BG_NEAR_BLACK: Color32 = Color32::from_rgb(10, 10, 16); // #0A0A10
 pub const PANEL_SURFACE: Color32 = Color32::from_rgb(20, 20, 31); // #14141F
 pub const WIDGET_SURFACE: Color32 = Color32::from_rgb(24, 24, 38);
 pub const WIDGET_HOVER: Color32 = Color32::from_rgb(31, 31, 49);
-pub const WIDGET_ACTIVE: Color32 = Color32::from_rgb(34, 26, 52);
+pub const WIDGET_ACTIVE: Color32 = Color32::from_rgb(24, 34, 48);
 pub const SUBTLE_BORDER: Color32 = Color32::from_rgb(38, 38, 58); // #26263A
 
-pub const NEON_GREEN: Color32 = Color32::from_rgb(61, 255, 122); // #3DFF7A
-pub const NEON_VIOLET: Color32 = Color32::from_rgb(169, 112, 255); // #A970FF
-pub const NEON_PINK: Color32 = Color32::from_rgb(255, 92, 168); // #FF5CA8
+pub const LOGO_BLUE: Color32 = Color32::from_rgb(84, 185, 242); // #54B9F2
+#[allow(dead_code)]
+pub const LOGO_BLUE_MID: Color32 = Color32::from_rgb(124, 208, 250); // #7CD0FA
+#[allow(dead_code)]
+pub const LOGO_BLUE_LIGHT: Color32 = Color32::from_rgb(165, 230, 255); // #A5E6FF
+pub const LOGO_PINK: Color32 = Color32::from_rgb(247, 168, 216); // #F7A8D8
+#[allow(dead_code)]
+pub const LOGO_PINK_LIGHT: Color32 = Color32::from_rgb(255, 199, 227); // #FFC7E3
+pub const LOGO_LAVENDER: Color32 = Color32::from_rgb(216, 166, 255); // #D8A6FF
 
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(237, 237, 242); // #EDEDF2
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 176); // #9A9AB0
@@ -177,26 +183,27 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
 
     visuals.widgets.hovered.bg_fill = WIDGET_HOVER;
     visuals.widgets.hovered.weak_bg_fill = WIDGET_HOVER;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, NEON_VIOLET);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, LOGO_BLUE);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.hovered.rounding = Rounding::same(6.0);
 
     visuals.widgets.active.bg_fill = WIDGET_ACTIVE;
     visuals.widgets.active.weak_bg_fill = WIDGET_ACTIVE;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, NEON_PINK);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0_f32, LOGO_PINK);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.active.rounding = Rounding::same(6.0);
 
     visuals.widgets.open.bg_fill = WIDGET_HOVER;
     visuals.widgets.open.weak_bg_fill = WIDGET_HOVER;
-    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, NEON_VIOLET);
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, LOGO_BLUE);
     visuals.widgets.open.fg_stroke = Stroke::new(1.0_f32, TEXT_PRIMARY);
     visuals.widgets.open.rounding = Rounding::same(6.0);
 
-    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(169, 112, 255, 42);
-    visuals.selection.stroke = Stroke::new(1.0_f32, NEON_VIOLET);
+    visuals.selection.bg_fill = Color32::from_rgba_unmultiplied(84, 185, 242, 42);
+    visuals.selection.stroke = Stroke::new(1.0_f32, LOGO_BLUE);
 
     style.visuals = visuals;
+    style.animation_time = 0.0;
     style.spacing.item_spacing = Vec2::new(SPACE_SM, SPACE_SM);
     style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS + 1.0);
     ctx.set_style(style);
@@ -205,8 +212,8 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
 #[inline]
 pub fn battery_bar_color(percent: Option<u8>) -> Color32 {
     match percent {
-        Some(p) if p <= 20 => NEON_PINK,
-        _ => NEON_GREEN,
+        Some(p) if p <= 20 => LOGO_PINK,
+        _ => LOGO_BLUE,
     }
 }
 
@@ -257,6 +264,7 @@ fn paint_gradient_rounded_rect_stroke(
     rounding: f32,
     stroke_width: f32,
     c_start: Color32,
+    c_mid: Color32,
     c_end: Color32,
     alpha: u8,
 ) {
@@ -282,7 +290,11 @@ fn paint_gradient_rounded_rect_stroke(
 
     for (p, norm) in &ring {
         let t = (((p.x - rect.left()) / w) * 0.65 + ((p.y - rect.top()) / h) * 0.35).clamp(0.0, 1.0);
-        let c = lerp_color(c_start, c_end, t);
+        let c = if t <= 0.5 {
+            lerp_color(c_start, c_mid, t * 2.0)
+        } else {
+            lerp_color(c_mid, c_end, (t - 0.5) * 2.0)
+        };
         let core = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha);
         let edge = Color32::TRANSPARENT;
 
@@ -313,7 +325,7 @@ fn paint_gradient_rounded_rect_stroke(
 }
 
 fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rounding: f32) {
-    // Static layered translucent outer glow (strictly outside card edge) + 1.5px violet-to-pink edge.
+    // Static layered translucent outer glow (strictly outside card edge) + 1.5px pastel blue -> lavender -> pink edge.
     for (expand, width, alpha) in [
         (4.0_f32, 4.0_f32, 12u8),
         (2.0_f32, 2.4_f32, 26u8),
@@ -324,8 +336,9 @@ fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rou
             rect.expand(expand),
             rounding + expand,
             width,
-            NEON_VIOLET,
-            NEON_PINK,
+            LOGO_BLUE,
+            LOGO_LAVENDER,
+            LOGO_PINK,
             alpha,
         );
     }
@@ -334,8 +347,9 @@ fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rou
         rect,
         rounding,
         1.5_f32,
-        NEON_VIOLET,
-        NEON_PINK,
+        LOGO_BLUE,
+        LOGO_LAVENDER,
+        LOGO_PINK,
         245,
     );
 }
@@ -362,7 +376,7 @@ fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool) -> bool {
         Rounding::same(5.0),
         Stroke::new(
             1.0_f32,
-            if hovered { NEON_VIOLET } else { SUBTLE_BORDER },
+            if hovered { LOGO_BLUE } else { SUBTLE_BORDER },
         ),
     );
     let c = rect.center();
@@ -540,7 +554,7 @@ pub fn draw_compact_main_snapshot(
                                 } else {
                                     Stroke::new(
                                         1.0_f32,
-                                        if is_selected { NEON_VIOLET } else { SUBTLE_BORDER },
+                                        if is_selected { LOGO_BLUE } else { SUBTLE_BORDER },
                                     )
                                 };
 
@@ -556,7 +570,7 @@ pub fn draw_compact_main_snapshot(
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = SPACE_SM;
                                             let dot = if ctrl.connected {
-                                                NEON_GREEN
+                                                LOGO_BLUE
                                             } else {
                                                 TEXT_MUTED
                                             };
@@ -615,9 +629,9 @@ pub fn draw_compact_main_snapshot(
                                         }
                                         if ctrl.virtual_active {
                                             egui::Frame::none()
-                                                .fill(Color32::from_rgb(24, 20, 40))
+                                                .fill(Color32::from_rgb(18, 28, 40))
                                                 .rounding(Rounding::same(4.0))
-                                                .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
+                                                .stroke(Stroke::new(1.0_f32, LOGO_BLUE))
                                                 .inner_margin(Margin::symmetric(SPACE_SM, 2.0))
                                                 .show(ui, |ui| {
                                                     ui.label(
@@ -631,7 +645,7 @@ pub fn draw_compact_main_snapshot(
                                                 });
                                         }
                                         let cloak_dot =
-                                            if ctrl.cloaked { NEON_GREEN } else { TEXT_MUTED };
+                                            if ctrl.cloaked { LOGO_BLUE } else { TEXT_MUTED };
                                         draw_status_dot(ui, cloak_dot);
                                         ui.label(
                                             RichText::new(if ctrl.cloaked {
@@ -702,8 +716,8 @@ pub fn draw_compact_main_snapshot(
                                             RichText::new("Edit Profile").small().color(TEXT_PRIMARY),
                                         )
                                         .min_size(Vec2::new(edit_btn_w, 0.0))
-                                        .fill(Color32::from_rgb(27, 22, 42))
-                                        .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
+                                        .fill(Color32::from_rgb(18, 28, 40))
+                                        .stroke(Stroke::new(1.0_f32, LOGO_BLUE))
                                         .rounding(Rounding::same(6.0));
                                         if ui.add(edit_btn).clicked() {
                                             state.selected_controller =
@@ -879,10 +893,10 @@ pub fn draw_profile_editor_snapshot(
                         } else {
                             "Apply & Save"
                         };
-                        let accent = if state.draft_dirty { NEON_PINK } else { NEON_VIOLET };
+                        let accent = if state.draft_dirty { LOGO_PINK } else { LOGO_BLUE };
                         let save_btn =
                             egui::Button::new(RichText::new(btn_text).strong().color(TEXT_PRIMARY))
-                                .fill(Color32::from_rgb(27, 22, 42))
+                                .fill(Color32::from_rgb(18, 28, 40))
                                 .stroke(Stroke::new(1.0_f32, accent))
                                 .rounding(Rounding::same(6.0));
                         if ui.add(save_btn).clicked() {
@@ -971,7 +985,7 @@ pub fn draw_profile_editor_snapshot(
                                             ui.painter().rect_stroke(
                                                 r.rect.expand(2.0),
                                                 Rounding::same(4.0),
-                                                Stroke::new(1.0_f32, NEON_VIOLET),
+                                                Stroke::new(1.0_f32, LOGO_BLUE),
                                             );
                                         }
                                         if r.changed() {
@@ -1132,14 +1146,14 @@ pub fn draw_profile_editor_snapshot(
                                     (c.physical_state.buttons_mask & src.bit()) != 0
                                 });
                                 let row_fill = if is_sel {
-                                    Color32::from_rgb(28, 23, 46)
+                                    Color32::from_rgb(20, 30, 44)
                                 } else {
                                     BG_NEAR_BLACK
                                 };
                                 let row_stroke = if is_phys {
-                                    Stroke::new(1.0_f32, NEON_PINK)
+                                    Stroke::new(1.0_f32, LOGO_PINK)
                                 } else if is_sel {
-                                    Stroke::new(1.0_f32, NEON_VIOLET)
+                                    Stroke::new(1.0_f32, LOGO_BLUE)
                                 } else {
                                     Stroke::new(1.0_f32, SUBTLE_BORDER)
                                 };
@@ -1156,9 +1170,9 @@ pub fn draw_profile_editor_snapshot(
                                         ui.horizontal(|ui| {
                                             ui.spacing_mut().item_spacing.x = SPACE_SM;
                                             let dot_col = if is_phys {
-                                                NEON_GREEN
+                                                LOGO_PINK
                                             } else if prof.button_remap.contains_key(&src) {
-                                                NEON_VIOLET
+                                                LOGO_LAVENDER
                                             } else {
                                                 SUBTLE_BORDER
                                             };
@@ -1252,7 +1266,7 @@ fn draw_remap_combobox(
 fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
     ui.spacing_mut().item_spacing.x = SPACE_SM;
     let ds = &snap.driver_status;
-    draw_status_dot(ui, if ds.vigem_installed { NEON_GREEN } else { NEON_PINK });
+    draw_status_dot(ui, if ds.vigem_installed { LOGO_BLUE } else { LOGO_PINK });
     ui.label(
         RichText::new(if ds.vigem_installed {
             "ViGEmBus: OK"
@@ -1265,11 +1279,11 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot) {
     ui.separator();
 
     let (hh_text, hh_dot) = if !ds.hidhide_installed {
-        ("HidHide: Missing", NEON_PINK)
+        ("HidHide: Missing", LOGO_PINK)
     } else if ds.hidhide_accessible {
-        ("HidHide: Ready", NEON_GREEN)
+        ("HidHide: Ready", LOGO_BLUE)
     } else {
-        ("HidHide: Locked", NEON_PINK)
+        ("HidHide: Locked", LOGO_PINK)
     };
     draw_status_dot(ui, hh_dot);
     ui.label(RichText::new(hh_text).small().color(TEXT_PRIMARY));
@@ -1315,22 +1329,22 @@ fn draw_status_bar(
                             .small()
                             .color(TEXT_PRIMARY),
                     )
-                    .fill(Color32::from_rgb(38, 18, 32))
-                    .stroke(Stroke::new(1.0_f32, NEON_PINK))
+                    .fill(Color32::from_rgb(38, 22, 34))
+                    .stroke(Stroke::new(1.0_f32, LOGO_PINK))
                     .rounding(Rounding::same(6.0));
                     if ui.add(install_btn).clicked() {
                         send(EngineCommand::InstallDrivers);
                     }
                 });
             } else if ds.reboot_recommended {
-                draw_status_dot(ui, NEON_PINK);
+                draw_status_dot(ui, LOGO_PINK);
                 ui.label(
                     RichText::new("Reboot recommended to finish driver setup")
                         .small()
                         .color(TEXT_MUTED),
                 );
             } else if let Some(err) = &ds.hidhide_error {
-                draw_status_dot(ui, NEON_PINK);
+                draw_status_dot(ui, LOGO_PINK);
                 ui.add(
                     egui::Label::new(RichText::new(err).small().color(TEXT_MUTED)).truncate(),
                 );
@@ -1510,11 +1524,11 @@ fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
         p.circle_filled(
             dot_pos,
             6.5,
-            Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 64),
+            Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 64),
         );
-        p.circle_filled(dot_pos, 3.8, NEON_PINK);
+        p.circle_filled(dot_pos, 3.8, LOGO_PINK);
     } else {
-        p.circle_filled(dot_pos, 3.0, NEON_VIOLET);
+        p.circle_filled(dot_pos, 3.0, LOGO_BLUE);
     }
 }
 
@@ -1537,7 +1551,7 @@ fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
             p.rect_filled(
                 Rect::from_min_size(inner.min, Vec2::new(fw, inner.height())),
                 Rounding::same(2.5),
-                NEON_VIOLET,
+                LOGO_PINK,
             );
         }
         ui.label(
@@ -1557,11 +1571,11 @@ fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool, width: f
             Rounding::same(4.5),
             Stroke::new(
                 1.5_f32,
-                Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 80),
+                Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 80),
             ),
         );
-        p.rect_filled(rect, Rounding::same(3.5), Color32::from_rgb(38, 24, 58));
-        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.5_f32, NEON_VIOLET));
+        p.rect_filled(rect, Rounding::same(3.5), Color32::from_rgb(38, 22, 34));
+        p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.5_f32, LOGO_PINK));
     } else {
         p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
         p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
@@ -1662,12 +1676,12 @@ mod tests {
     }
 
     #[test]
-    fn battery_bar_uses_pink_at_or_below_twenty_and_green_above() {
-        assert_eq!(battery_bar_color(Some(0)), NEON_PINK);
-        assert_eq!(battery_bar_color(Some(20)), NEON_PINK);
-        assert_eq!(battery_bar_color(Some(21)), NEON_GREEN);
-        assert_eq!(battery_bar_color(Some(100)), NEON_GREEN);
-        assert_eq!(battery_bar_color(None), NEON_GREEN);
+    fn battery_bar_uses_pink_at_or_below_twenty_and_blue_above() {
+        assert_eq!(battery_bar_color(Some(0)), LOGO_PINK);
+        assert_eq!(battery_bar_color(Some(20)), LOGO_PINK);
+        assert_eq!(battery_bar_color(Some(21)), LOGO_BLUE);
+        assert_eq!(battery_bar_color(Some(100)), LOGO_BLUE);
+        assert_eq!(battery_bar_color(None), LOGO_BLUE);
     }
 
     #[test]

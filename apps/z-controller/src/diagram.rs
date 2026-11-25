@@ -5,7 +5,7 @@ use z_core::profile::Profile;
 
 use crate::engine::PhysicalSnapshot;
 use crate::ui::{
-    BG_NEAR_BLACK, NEON_GREEN, NEON_PINK, NEON_VIOLET, SUBTLE_BORDER, TEXT_MUTED, TEXT_PRIMARY,
+    BG_NEAR_BLACK, LOGO_BLUE, LOGO_LAVENDER, LOGO_PINK, SUBTLE_BORDER, TEXT_MUTED, TEXT_PRIMARY,
     normalize_stick_axis, normalize_trigger_axis,
 };
 
@@ -581,10 +581,10 @@ fn paint_controller_silhouette(p: &egui::Painter, stage: Rect, family: Controlle
     }
     p.add(Shape::mesh(mesh));
 
-    // Soft outer violet hairline rim + crisp shell stroke
+    // Soft outer pastel-blue hairline rim + crisp shell stroke
     p.add(Shape::Path(PathShape::closed_line(
         outline.clone(),
-        Stroke::new(2.8_f32, Color32::from_rgba_unmultiplied(NEON_VIOLET.r(), NEON_VIOLET.g(), NEON_VIOLET.b(), 26)),
+        Stroke::new(2.8_f32, Color32::from_rgba_unmultiplied(LOGO_BLUE.r(), LOGO_BLUE.g(), LOGO_BLUE.b(), 26)),
     )));
     p.add(Shape::Path(PathShape::closed_line(
         outline,
@@ -616,12 +616,12 @@ fn paint_controller_silhouette(p: &egui::Painter, stage: Rect, family: Controlle
 
 fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
     let pressed = value > 0.05;
-    let border = if pressed { NEON_PINK } else { Color32::from_rgb(48, 48, 74) };
+    let border = if pressed { LOGO_PINK } else { Color32::from_rgb(48, 48, 74) };
     if pressed {
         p.rect_stroke(
             rect.expand(1.5),
             Rounding::same(8.5),
-            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 64)),
+            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 64)),
         );
     }
     p.rect_filled(rect, Rounding::same(7.0), Color32::from_rgb(20, 20, 34));
@@ -641,7 +641,7 @@ fn paint_trigger_bar(p: &egui::Painter, rect: Rect, label: &str, value: f32) {
         p.rect_filled(
             Rect::from_min_size(bar.min, Vec2::new(fw, bar.height())),
             Rounding::same(1.5),
-            NEON_PINK,
+            LOGO_PINK,
         );
     }
     p.text(
@@ -664,18 +664,18 @@ fn button_visuals(
     let remapped = profile.button_remap.contains_key(&btn);
 
     let fill = if pressed {
-        Color32::from_rgb(48, 24, 66)
+        Color32::from_rgb(42, 24, 38)
     } else if selected {
-        Color32::from_rgb(31, 24, 52)
+        Color32::from_rgb(20, 32, 46)
     } else {
         Color32::from_rgb(24, 24, 40)
     };
     let stroke = if pressed {
-        Stroke::new(1.8_f32, NEON_PINK)
+        Stroke::new(1.8_f32, LOGO_PINK)
     } else if selected {
-        Stroke::new(1.8_f32, NEON_VIOLET)
+        Stroke::new(1.8_f32, LOGO_BLUE)
     } else if remapped {
-        Stroke::new(1.2_f32, Color32::from_rgb(128, 92, 198))
+        Stroke::new(1.2_f32, LOGO_LAVENDER)
     } else {
         Stroke::new(1.1_f32, Color32::from_rgb(54, 54, 82))
     };
@@ -756,7 +756,7 @@ fn paint_center_icon(p: &egui::Painter, center: Pos2, rect: Rect, icon: CenterVi
                 Pos2::new(rect.left() + 8.0, rect.top() + 3.5),
                 Pos2::new(rect.right() - 8.0, rect.top() + 5.5),
             );
-            p.rect_filled(light, Rounding::same(1.0), NEON_VIOLET);
+            p.rect_filled(light, Rounding::same(1.0), LOGO_BLUE);
             p.text(
                 Pos2::new(center.x, center.y + 3.0),
                 Align2::CENTER_CENTER,
@@ -797,7 +797,7 @@ fn paint_center_icon(p: &egui::Painter, center: Pos2, rect: Rect, icon: CenterVi
             );
             p.line_segment(
                 [Pos2::new(center.x - 5.5, center.y + 3.0), Pos2::new(center.x + 5.5, center.y - 3.0)],
-                Stroke::new(1.1_f32, NEON_PINK),
+                Stroke::new(1.1_f32, LOGO_PINK),
             );
         }
         CenterVisual::MinusBar => {
@@ -852,7 +852,7 @@ fn draw_bar_button(
         button_visuals(btn, profile, phys, *selected_button);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_rect(p, rect, rounding, if pressed { NEON_PINK } else { NEON_VIOLET });
+        paint_selection_glow_rect(p, rect, rounding, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     p.rect_filled(rect, Rounding::same(rounding), fill);
     p.rect_stroke(rect, Rounding::same(rounding), stroke);
@@ -871,7 +871,7 @@ fn draw_bar_button(
         paint_center_icon(p, rect.center(), rect, vis, fg);
     }
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(rect.right() - 4.0, rect.top() + 4.0), 2.0, NEON_VIOLET);
+        p.circle_filled(Pos2::new(rect.right() - 4.0, rect.top() + 4.0), 2.0, LOGO_LAVENDER);
     }
 }
 
@@ -895,14 +895,14 @@ fn draw_center_circle(
         button_visuals(btn, profile, phys, *selected_button);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { NEON_PINK } else { NEON_VIOLET });
+        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
     let fg = if pressed || selected { TEXT_PRIMARY } else { TEXT_MUTED };
     paint_center_icon(p, center, rect, icon, fg);
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.0, NEON_VIOLET);
+        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.0, LOGO_LAVENDER);
     }
 }
 
@@ -926,7 +926,7 @@ fn draw_face_circle(
         button_visuals(btn, profile, phys, *selected_button);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { NEON_PINK } else { NEON_VIOLET });
+        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
@@ -951,7 +951,7 @@ fn draw_face_circle(
             ];
             p.add(Shape::Path(PathShape::closed_line(
                 pts,
-                Stroke::new(1.5_f32, if pressed { NEON_GREEN } else { fg }),
+                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
             )));
         }
         FaceGlyph::Square => {
@@ -959,26 +959,26 @@ fn draw_face_circle(
             p.rect_stroke(
                 sq,
                 Rounding::same(1.0),
-                Stroke::new(1.5_f32, if pressed { NEON_PINK } else { fg }),
+                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
             );
         }
         FaceGlyph::Circle => {
             p.circle_stroke(
                 center,
                 radius * 0.46,
-                Stroke::new(1.5_f32, if pressed { NEON_PINK } else { fg }),
+                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
             );
         }
         FaceGlyph::Cross => {
             let r = radius * 0.42;
-            let st = Stroke::new(1.6_f32, if pressed { NEON_VIOLET } else { fg });
+            let st = Stroke::new(1.6_f32, if pressed { LOGO_PINK } else { fg });
             p.line_segment([Pos2::new(center.x - r, center.y - r), Pos2::new(center.x + r, center.y + r)], st);
             p.line_segment([Pos2::new(center.x + r, center.y - r), Pos2::new(center.x - r, center.y + r)], st);
         }
     }
 
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.2, NEON_VIOLET);
+        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.2, LOGO_LAVENDER);
     }
 }
 
@@ -1076,7 +1076,7 @@ fn draw_plus_dpad(
             button_visuals(btn, profile, phys, *selected_button);
         let p = ui.painter();
         if pressed || selected {
-            paint_selection_glow_rect(p, rect, 3.0, if pressed { NEON_PINK } else { NEON_VIOLET });
+            paint_selection_glow_rect(p, rect, 3.0, if pressed { LOGO_PINK } else { LOGO_BLUE });
             p.rect_filled(rect, Rounding::same(2.5), fill);
             p.rect_stroke(rect, Rounding::same(2.5), stroke);
         } else if remapped {
@@ -1113,7 +1113,7 @@ fn draw_stick_assembly(
         button_visuals(click_btn, profile, phys, *selected_button);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { NEON_PINK } else { NEON_VIOLET });
+        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     // Outer gate well + inner ringed thumbstick cap
     p.circle_filled(center, radius, BG_NEAR_BLACK);
@@ -1133,14 +1133,14 @@ fn draw_stick_assembly(
         p.circle_filled(
             dot,
             7.5,
-            Color32::from_rgba_unmultiplied(NEON_PINK.r(), NEON_PINK.g(), NEON_PINK.b(), 68),
+            Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 68),
         );
-        p.circle_filled(dot, 4.2, NEON_PINK);
+        p.circle_filled(dot, 4.2, LOGO_PINK);
     } else {
-        p.circle_filled(dot, 3.6, if pressed { NEON_GREEN } else { NEON_VIOLET });
+        p.circle_filled(dot, 3.6, if pressed { LOGO_PINK } else { LOGO_BLUE });
     }
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius - 3.0, center.y - radius + 3.0), 2.2, NEON_VIOLET);
+        p.circle_filled(Pos2::new(center.x + radius - 3.0, center.y - radius + 3.0), 2.2, LOGO_LAVENDER);
     }
 }
 
