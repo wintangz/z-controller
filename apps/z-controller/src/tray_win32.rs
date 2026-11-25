@@ -18,7 +18,7 @@ use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    AdjustWindowRectEx, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
     DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos,
     GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HICON, IDC_ARROW, IMAGE_ICON,
     LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MF_STRING, MSG, PM_REMOVE, PeekMessageW,
@@ -307,12 +307,12 @@ fn load_app_icons(hinstance: HINSTANCE) -> (HICON, HICON) {
 
     if !large.is_null() && !small.is_null() {
         (large, small)
+    } else if !large.is_null() {
+        (large, large)
+    } else if !small.is_null() {
+        (small, small)
     } else {
-        let fb = unsafe { create_gamepad_icon() };
-        (
-            if large.is_null() { fb } else { large },
-            if small.is_null() { fb } else { small },
-        )
+        (null_mut(), null_mut())
     }
 }
 
@@ -1440,41 +1440,6 @@ fn remove_tray_icon(hwnd: HWND) {
     nid.uID = 1;
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &nid);
-    }
-}
-
-unsafe fn create_gamepad_icon() -> HICON {
-    const SIZE: usize = 16;
-    let mut color = [0u32; SIZE * SIZE];
-    let and_mask = [0u8; SIZE * 2];
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let inside = (3..13).contains(&y)
-                && (1..15).contains(&x)
-                && !((y == 3 || y == 12) && (x < 3 || x > 12));
-            if inside {
-                let left_accent = y == 7 && (x == 4 || x == 5);
-                let right_accent = (y == 7 && x == 11) || (y == 8 && x == 10);
-                color[y * SIZE + x] = if left_accent {
-                    0xFFA9_70FF
-                } else if right_accent {
-                    0xFF3D_FF7A
-                } else {
-                    0xFF14_141F
-                };
-            }
-        }
-    }
-    unsafe {
-        CreateIcon(
-            null_mut(),
-            SIZE as i32,
-            SIZE as i32,
-            1,
-            32,
-            and_mask.as_ptr(),
-            color.as_ptr().cast(),
-        )
     }
 }
 
