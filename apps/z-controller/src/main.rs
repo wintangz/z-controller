@@ -397,6 +397,9 @@ struct ProfileSwitchProbeReport {
     xinput_slot: u32,
     before_xinput_buttons: String,
     after_xinput_buttons: String,
+    after_collapse_show_live_input: bool,
+    persisted_show_live_input_after_reload: bool,
+    after_collapse_xinput_buttons: String,
     emitted_commands_count: usize,
     combo_clicked_xy: [f32; 2],
     item_clicked_xy: [f32; 2],
@@ -530,11 +533,34 @@ fn run_profile_switch_probe(out_path: &std::path::Path) -> Result<(), String> {
     let (_, after_xi) =
         read_xinput_buttons().ok_or_else(|| "no active XInput slot after switch".to_string())?;
 
+    // Collapse live input section for this controller and verify persistence + uninterrupted virtual output.
+    engine.send(EngineCommand::SetDeviceShowLiveInput {
+        key: ctrl.key.clone(),
+        show_live_input: false,
+    });
+    vp.set_button(SdlGamepadButton::South, true);
+    vp.pump();
+    engine.wake();
+    std::thread::sleep(Duration::from_millis(180));
+    let collapsed_snap = engine.snapshot();
+    let collapsed_ctrl = collapsed_snap
+        .controllers
+        .iter()
+        .find(|c| c.canonical_id == ctrl.canonical_id)
+        .cloned()
+        .ok_or_else(|| "controller missing after collapse".to_string())?;
+    let (_, collapsed_xi) =
+        read_xinput_buttons().ok_or_else(|| "no active XInput slot after collapse".to_string())?;
+    let persisted_show_live = AppConfig::load_or_default(&cfg_path).show_live_input_for_device(&ctrl.key);
+
     let passed = cmd_count >= 1
         && ctrl.profile_id == "xbox-360"
         && after_ctrl.profile_id == "probe-swap"
         && before_xi == 0x1000
-        && after_xi == 0x2000;
+        && after_xi == 0x2000
+        && !collapsed_ctrl.show_live_input
+        && !persisted_show_live
+        && collapsed_xi == 0x2000;
 
     let report = ProfileSwitchProbeReport {
         passed,
@@ -544,6 +570,9 @@ fn run_profile_switch_probe(out_path: &std::path::Path) -> Result<(), String> {
         xinput_slot: slot_idx,
         before_xinput_buttons: format!("0x{before_xi:04X}"),
         after_xinput_buttons: format!("0x{after_xi:04X}"),
+        after_collapse_show_live_input: collapsed_ctrl.show_live_input,
+        persisted_show_live_input_after_reload: persisted_show_live,
+        after_collapse_xinput_buttons: format!("0x{collapsed_xi:04X}"),
         emitted_commands_count: cmd_count,
         combo_clicked_xy: [combo_pos.x, combo_pos.y],
         item_clicked_xy: [item_pos.x, item_pos.y],
@@ -576,6 +605,7 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
             transport: Transport::Bluetooth,
             connected: true,
             enabled: true,
+            show_live_input: false,
             profile_id: "switch-pro".to_string(),
             profile_name: "Nintendo Switch Pro Controller".to_string(),
             target_kind: VirtualTargetKind::Xbox360,
@@ -601,6 +631,7 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
             transport: Transport::Usb,
             connected: true,
             enabled: false,
+            show_live_input: true,
             profile_id: "dualsense".to_string(),
             profile_name: "DualSense".to_string(),
             target_kind: VirtualTargetKind::DualShock4,
@@ -613,6 +644,40 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
                 source: "sony-hid",
             },
             present_buttons_mask: 0x001F_FFFF,
+            physical_state: PhysicalSnapshot {
+                buttons_mask: LogicalButton::South.bit() | LogicalButton::Touchpad.bit(),
+                left_x: 18000,
+                left_y: -15000,
+                right_x: 0,
+                right_y: 0,
+                left_trigger: 0,
+                right_trigger: 16000,
+            },
+            virtual_output: VirtualOutputSnapshot::None,
+            instance_id: None,
+        },
+        ControllerSnapshot {
+            key: HardwareKey::new(0x045E, 0x0B12, "XBOX-SX-03"),
+            canonical_id: "045e:0b12:XBOX-SX-03".to_string(),
+            sdl_id: Some(3),
+            name: "Xbox Series Wireless Controller".to_string(),
+            family: ControllerFamily::Xbox,
+            transport: Transport::Bluetooth,
+            connected: true,
+            enabled: true,
+            show_live_input: false,
+            profile_id: "xbox-360".to_string(),
+            profile_name: "Xbox 360".to_string(),
+            target_kind: VirtualTargetKind::Xbox360,
+            cloaked: true,
+            virtual_active: true,
+            virtual_serial: Some(2),
+            battery: BatteryReading {
+                percent: Some(74),
+                status: BatteryStatus::OnBattery,
+                source: "xinput",
+            },
+            present_buttons_mask: LogicalButton::Misc1.bit(),
             physical_state: PhysicalSnapshot::default(),
             virtual_output: VirtualOutputSnapshot::None,
             instance_id: None,

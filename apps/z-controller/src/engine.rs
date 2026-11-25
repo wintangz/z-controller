@@ -40,6 +40,7 @@ pub struct ControllerSnapshot {
     pub transport: Transport,
     pub connected: bool,
     pub enabled: bool,
+    pub show_live_input: bool,
     pub profile_id: String,
     pub profile_name: String,
     pub target_kind: VirtualTargetKind,
@@ -145,6 +146,10 @@ pub enum EngineCommand {
     SetDeviceEnabled {
         key: HardwareKey,
         enabled: bool,
+    },
+    SetDeviceShowLiveInput {
+        key: HardwareKey,
+        show_live_input: bool,
     },
     UpsertProfile(Profile),
     DeleteProfile(String),
@@ -884,6 +889,14 @@ fn handle_ui_command(
             let _ = config.save_atomic(config_path);
             reconcile_slots(pads, config, backend, coord, waker, last_status_message);
         }
+        EngineCommand::SetDeviceShowLiveInput {
+            key,
+            show_live_input,
+        } => {
+            // Purely visual UI preference: persist without touching SDL pads or virtual output slots.
+            config.set_device_show_live_input(&key, show_live_input);
+            let _ = config.save_atomic(config_path);
+        }
         EngineCommand::UpsertProfile(profile) => {
             if let Some(existing) = config.profiles.iter_mut().find(|p| p.id == profile.id) {
                 *existing = profile;
@@ -1027,6 +1040,7 @@ fn publish_snapshot(
             transport: pad.transport,
             connected: true,
             enabled,
+            show_live_input: config.show_live_input_for_device(&pad.key),
             profile_id: profile.id.clone(),
             profile_name: profile.name.clone(),
             target_kind: profile.target,
@@ -1049,6 +1063,7 @@ fn publish_snapshot(
         if let Some(binding_key) = parse_canonical_key(canonical) {
             if let Some(slot) = coord.get(&binding_key) {
                 let (enabled, profile) = config.profile_for_device(&binding_key);
+                let show_live_input = config.show_live_input_for_device(&binding_key);
                 let virt_out = slot
                     .last_sent
                     .as_ref()
@@ -1063,6 +1078,7 @@ fn publish_snapshot(
                     transport: *transport,
                     connected: false,
                     enabled,
+                    show_live_input,
                     profile_id: profile.id.clone(),
                     profile_name: profile.name.clone(),
                     target_kind: profile.target,

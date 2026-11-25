@@ -115,6 +115,7 @@ pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
         c.canonical_id.hash(&mut h);
         c.connected.hash(&mut h);
         c.enabled.hash(&mut h);
+        c.show_live_input.hash(&mut h);
         c.profile_id.hash(&mut h);
         (c.target_kind as u8).hash(&mut h);
         c.cloaked.hash(&mut h);
@@ -345,6 +346,38 @@ fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32) {
     ui.add_space(SPACE_SM);
 }
 
+fn draw_collapse_chevron_button(ui: &mut egui::Ui, expanded: bool) -> bool {
+    let size = Vec2::splat(20.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovered = resp.hovered();
+    let p = ui.painter();
+    p.rect_filled(
+        rect,
+        Rounding::same(5.0),
+        if hovered { WIDGET_HOVER } else { BG_NEAR_BLACK },
+    );
+    p.rect_stroke(
+        rect,
+        Rounding::same(5.0),
+        Stroke::new(
+            1.0_f32,
+            if hovered { NEON_VIOLET } else { SUBTLE_BORDER },
+        ),
+    );
+    let c = rect.center();
+    let st = Stroke::new(1.5_f32, if hovered { TEXT_PRIMARY } else { TEXT_MUTED });
+    if expanded {
+        // Chevron down (expanded)
+        p.line_segment([Pos2::new(c.x - 4.0, c.y - 2.0), Pos2::new(c.x, c.y + 2.5)], st);
+        p.line_segment([Pos2::new(c.x, c.y + 2.5), Pos2::new(c.x + 4.0, c.y - 2.0)], st);
+    } else {
+        // Chevron right (collapsed)
+        p.line_segment([Pos2::new(c.x - 2.0, c.y - 4.0), Pos2::new(c.x + 2.5, c.y)], st);
+        p.line_segment([Pos2::new(c.x + 2.5, c.y), Pos2::new(c.x - 2.0, c.y + 4.0)], st);
+    }
+    resp.clicked()
+}
+
 fn draw_status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -466,58 +499,78 @@ pub fn draw_compact_main_snapshot(
                 return;
             }
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                // Inner 4px/8px inset keeps active cards' 4px static outer glow unclipped while aligning card edges.
-                egui::Frame::none()
-                    .inner_margin(Margin::symmetric(SPACE_XS + 2.0, SPACE_XS + 2.0))
-                    .show(ui, |ui| {
-                        let card_inner_w = (ui.available_width() - SPACE_MD * 2.0).max(280.0);
-                        for ctrl in &snap.controllers {
-                            let is_selected =
-                                state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
-                            let card_fill = if is_selected {
-                                WIDGET_SURFACE
-                            } else {
-                                PANEL_SURFACE
-                            };
-                            let card_stroke = if ctrl.virtual_active {
-                                Stroke::NONE
-                            } else {
-                                Stroke::new(
-                                    1.0_f32,
-                                    if is_selected { NEON_VIOLET } else { SUBTLE_BORDER },
-                                )
-                            };
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Inner 6px inset keeps active cards' 4px static outer glow unclipped while locking single-column vertical flow.
+                    egui::Frame::none()
+                        .inner_margin(Margin::symmetric(SPACE_XS + 2.0, SPACE_XS + 2.0))
+                        .show(ui, |ui| {
+                            let avail_col = ui.available_width();
+                            ui.set_max_width(avail_col);
+                            let card_inner_w = (avail_col - SPACE_MD * 2.0).max(200.0);
+                            for ctrl in &snap.controllers {
+                                let is_selected =
+                                    state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
+                                let card_fill = if is_selected {
+                                    WIDGET_SURFACE
+                                } else {
+                                    PANEL_SURFACE
+                                };
+                                let card_stroke = if ctrl.virtual_active {
+                                    Stroke::NONE
+                                } else {
+                                    Stroke::new(
+                                        1.0_f32,
+                                        if is_selected { NEON_VIOLET } else { SUBTLE_BORDER },
+                                    )
+                                };
 
-                            let card_resp = egui::Frame::none()
-                                .fill(card_fill)
-                                .rounding(CARD_ROUNDING)
-                                .inner_margin(Margin::same(SPACE_MD))
-                                .stroke(card_stroke)
-                                .show(ui, |ui| {
-                                    ui.set_min_width(card_inner_w);
-                                    ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
+                                let card_resp = egui::Frame::none()
+                                    .fill(card_fill)
+                                    .rounding(CARD_ROUNDING)
+                                    .inner_margin(Margin::same(SPACE_MD))
+                                    .stroke(card_stroke)
+                                    .show(ui, |ui| {
+                                        ui.set_width(card_inner_w);
+                                        ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
 
-                                    let header_resp = ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                        let dot =
-                                            if ctrl.connected { NEON_GREEN } else { TEXT_MUTED };
-                                        draw_status_dot(ui, dot);
-                                        ui.label(
-                                            RichText::new(&ctrl.name).strong().color(TEXT_PRIMARY),
-                                        );
-                                    });
-                                    if ui
-                                        .interact(
-                                            header_resp.response.rect,
-                                            ui.id().with(&ctrl.canonical_id),
-                                            egui::Sense::click(),
-                                        )
-                                        .clicked()
-                                    {
-                                        state.selected_controller =
-                                            Some(ctrl.canonical_id.clone());
-                                    }
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            let dot = if ctrl.connected {
+                                                NEON_GREEN
+                                            } else {
+                                                TEXT_MUTED
+                                            };
+                                            draw_status_dot(ui, dot);
+                                            let title_resp = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&ctrl.name)
+                                                        .strong()
+                                                        .color(TEXT_PRIMARY),
+                                                )
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if title_resp.clicked() {
+                                                state.selected_controller =
+                                                    Some(ctrl.canonical_id.clone());
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if draw_collapse_chevron_button(
+                                                        ui,
+                                                        ctrl.show_live_input,
+                                                    ) {
+                                                        send(EngineCommand::SetDeviceShowLiveInput {
+                                                            key: ctrl.key.clone(),
+                                                            show_live_input: !ctrl.show_live_input,
+                                                        });
+                                                    }
+                                                },
+                                            );
+                                        });
 
                                     ui.label(
                                         RichText::new(format!(
@@ -632,21 +685,23 @@ pub fn draw_compact_main_snapshot(
                                         }
                                     });
 
-                                    let live_resp = ui.scope(|ui| {
-                                        draw_card_live_status(
-                                            ui,
-                                            ctrl.family,
-                                            ctrl.present_buttons_mask,
-                                            &ctrl.physical_state,
-                                            card_inner_w,
+                                    if ctrl.show_live_input {
+                                        let live_resp = ui.scope(|ui| {
+                                            draw_card_live_status(
+                                                ui,
+                                                ctrl.family,
+                                                ctrl.present_buttons_mask,
+                                                &ctrl.physical_state,
+                                                card_inner_w,
+                                            );
+                                        });
+                                        let lr = live_resp.response.rect;
+                                        state.last_dynamic_rect_main = Some(
+                                            state
+                                                .last_dynamic_rect_main
+                                                .map_or(lr, |prev| prev.union(lr)),
                                         );
-                                    });
-                                    let lr = live_resp.response.rect;
-                                    state.last_dynamic_rect_main = Some(
-                                        state
-                                            .last_dynamic_rect_main
-                                            .map_or(lr, |prev| prev.union(lr)),
-                                    );
+                                    }
                                 });
 
                             if ctrl.virtual_active {
@@ -1470,6 +1525,7 @@ mod tests {
                     transport: Transport::Bluetooth,
                     connected: true,
                     enabled: true,
+                    show_live_input: true,
                     profile_id: "xbox-360".to_string(),
                     profile_name: "Xbox 360".to_string(),
                     target_kind: VirtualTargetKind::Xbox360,
@@ -1504,6 +1560,7 @@ mod tests {
                     transport: Transport::Usb,
                     connected: true,
                     enabled: false,
+                    show_live_input: true,
                     profile_id: "dualsense".to_string(),
                     profile_name: "DualSense".to_string(),
                     target_kind: VirtualTargetKind::DualShock4,
@@ -1700,5 +1757,135 @@ mod tests {
             )),
             "expected SelectDeviceProfile {{ profile_id: \"dualsense\" }} from ComboBox click, got {emitted:?}"
         );
+    }
+
+    #[test]
+    fn collapse_icon_toggle_emits_command_and_collapses_card_height() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        snap.controllers.truncate(1);
+        let mut ui_state = AppUiState::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(396.0, 601.0)));
+
+        // Expanded render: locate "Edit Profile" bottom & header chevron position (`top_right` of card)
+        let mut emitted = Vec::new();
+        let out_exp = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(0.05),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                    emitted.push(cmd);
+                });
+            },
+        );
+        let exp_dyn = ui_state
+            .last_dynamic_rect_main
+            .expect("expected live input section rect when show_live_input=true");
+        assert!(exp_dyn.height() > 90.0);
+
+        // Locate chevron toggle button right of controller name ("Nintendo Switch Pro Controller")
+        let name_center =
+            find_text_center(&out_exp.shapes, "Nintendo Switch Pro Controller").unwrap();
+        fn find_square_button_near_y(shapes: &[egui::epaint::ClippedShape], target_y: f32) -> Option<Pos2> {
+            fn scan(s: &egui::Shape, target_y: f32) -> Option<Pos2> {
+                match s {
+                    egui::Shape::Vec(v) => v.iter().rev().find_map(|c| scan(c, target_y)),
+                    egui::Shape::Rect(rs)
+                        if (rs.rect.width() - 20.0).abs() < 1.5
+                            && (rs.rect.height() - 20.0).abs() < 1.5
+                            && (rs.rect.center().y - target_y).abs() < 8.0 =>
+                    {
+                        Some(rs.rect.center())
+                    }
+                    _ => None,
+                }
+            }
+            shapes.iter().rev().find_map(|c| scan(&c.shape, target_y))
+        }
+        let toggle_pos = find_square_button_near_y(&out_exp.shapes, name_center.y)
+            .expect("expected 20x20 chevron toggle button on card header");
+        for (i, pressed) in [(1, true), (2, false)] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(0.05 * (i + 1) as f64),
+                    events: vec![
+                        egui::Event::PointerMoved(toggle_pos),
+                        egui::Event::PointerButton {
+                            pos: toggle_pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd);
+                    });
+                },
+            );
+        }
+        assert!(
+            emitted.iter().any(|c| matches!(
+                c,
+                EngineCommand::SetDeviceShowLiveInput {
+                    show_live_input: false,
+                    ..
+                }
+            )),
+            "expected SetDeviceShowLiveInput {{ show_live_input: false }}, got {emitted:?}"
+        );
+
+        // Render collapsed state: live section omitted, last_dynamic_rect_main is None
+        snap.controllers[0].show_live_input = false;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(0.25),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+        assert!(ui_state.last_dynamic_rect_main.is_none());
+    }
+
+    #[test]
+    fn multiple_controllers_stack_vertically_in_single_column() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        let mut third = snap.controllers[0].clone();
+        third.key = HardwareKey::new(0x045E, 0x0B12, "XBOX-3");
+        third.canonical_id = "045e:0b12:XBOX-3".to_string();
+        third.name = "Xbox Series Pad 3".to_string();
+        third.show_live_input = false;
+        snap.controllers.push(third);
+
+        let mut ui_state = AppUiState::default();
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(396.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+
+        let p1 = find_text_center(&out.shapes, "Nintendo Switch Pro Controller").unwrap();
+        let p2 = find_text_center(&out.shapes, "DualSense Wireless Controller").unwrap();
+        let p3 = find_text_center(&out.shapes, "Xbox Series Pad 3").unwrap();
+
+        assert!(p1.y < p2.y && p2.y < p3.y, "cards must stack strictly vertically: {p1:?} {p2:?} {p3:?}");
+        assert!((p1.x - p2.x).abs() < 12.0 && p2.x < 250.0, "cards must share single column");
     }
 }

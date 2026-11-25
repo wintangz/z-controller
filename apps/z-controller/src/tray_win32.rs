@@ -6,7 +6,7 @@ use std::time::Instant;
 use egui::{
     Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, RawInput, Rect, Vec2, ViewportId,
 };
-use windows_sys::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
@@ -28,7 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     TPM_LEFTALIGN, TrackPopupMenu, TranslateMessage, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_DESTROY,
     WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEWHEEL, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSEXW,
-    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
+    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
+    WS_THICKFRAME,
 };
 
 use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
@@ -44,6 +45,9 @@ const WM_DPICHANGED: u32 = 0x02E0;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_ENTERSIZEMOVE: u32 = 0x0231;
 const WM_EXITSIZEMOVE: u32 = 0x0232;
+const WM_GETMINMAXINFO: u32 = 0x0024;
+const WM_NCHITTEST: u32 = 0x0084;
+const WM_SIZING: u32 = 0x0214;
 const CMD_OPEN: usize = 1001;
 const CMD_QUIT: usize = 1002;
 const CLEAR_BG_RGB: u32 = 0x000A_0A10;
@@ -51,10 +55,34 @@ const CLEAR_BG_RGB: u32 = 0x000A_0A10;
 // Logical client dimensions at 96 DPI (exact same UI geometry at 100%, scaled cleanly per monitor DPI).
 const COMPACT_CLIENT_LOGICAL_W: i32 = 396;
 const COMPACT_CLIENT_LOGICAL_H: i32 = 601;
+const COMPACT_CLIENT_MIN_LOGICAL_H: i32 = 340;
 const EDITOR_CLIENT_LOGICAL_W: i32 = 1024;
 const EDITOR_CLIENT_LOGICAL_H: i32 = 641;
-const WINDOW_STYLE: u32 =
+// Main compact window locks horizontal width (no Maximize, vertical resize only).
+const MAIN_WINDOW_STYLE: u32 =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
+const EDITOR_WINDOW_STYLE: u32 =
     WS_OVERLAPPEDWINDOW | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+#[repr(C)]
+struct MinMaxInfo {
+    pt_reserved: POINT,
+    pt_max_size: POINT,
+    pt_max_position: POINT,
+    pt_min_track_size: POINT,
+    pt_max_track_size: POINT,
+}
+
+#[inline]
+fn main_fixed_outer_width(dpi: u32) -> i32 {
+    outer_size_for_dpi(
+        COMPACT_CLIENT_LOGICAL_W,
+        COMPACT_CLIENT_LOGICAL_H,
+        MAIN_WINDOW_STYLE,
+        dpi,
+    )
+    .0
+}
 
 static REGISTER_EDITOR_CLASS: Once = Once::new();
 
@@ -142,9 +170,14 @@ fn outer_size_for_dpi(
     }
 }
 
-fn sync_window_dpi_and_bounds(hwnd: HWND, client_logical_w: i32, client_logical_h: i32) -> (u32, usize, usize) {
+fn sync_window_dpi_and_bounds(
+    hwnd: HWND,
+    style: u32,
+    client_logical_w: i32,
+    client_logical_h: i32,
+) -> (u32, usize, usize) {
     let dpi = get_dpi_for_window(hwnd);
-    let (outer_w, outer_h) = outer_size_for_dpi(client_logical_w, client_logical_h, WINDOW_STYLE, dpi);
+    let (outer_w, outer_h) = outer_size_for_dpi(client_logical_w, client_logical_h, style, dpi);
     unsafe {
         SetWindowPos(
             hwnd,
@@ -165,10 +198,16 @@ fn sync_window_dpi_and_bounds(hwnd: HWND, client_logical_w: i32, client_logical_
     )
 }
 
-fn send_test_dpi_change(hwnd: HWND, dpi: u32, client_logical_w: i32, client_logical_h: i32) {
+fn send_test_dpi_change(
+    hwnd: HWND,
+    style: u32,
+    dpi: u32,
+    client_logical_w: i32,
+    client_logical_h: i32,
+) {
     let mut rc: RECT = unsafe { std::mem::zeroed() };
     unsafe { GetWindowRect(hwnd, &mut rc) };
-    let (outer_w, outer_h) = outer_size_for_dpi(client_logical_w, client_logical_h, WINDOW_STYLE, dpi);
+    let (outer_w, outer_h) = outer_size_for_dpi(client_logical_w, client_logical_h, style, dpi);
     let suggested = RECT {
         left: rc.left,
         top: rc.top,
@@ -294,7 +333,7 @@ pub fn run_tray_app(
     let (init_outer_w, init_outer_h) = outer_size_for_dpi(
         COMPACT_CLIENT_LOGICAL_W,
         COMPACT_CLIENT_LOGICAL_H,
-        WINDOW_STYLE,
+        MAIN_WINDOW_STYLE,
         init_dpi,
     );
 
@@ -322,7 +361,7 @@ pub fn run_tray_app(
             0,
             class_name.as_ptr(),
             title.as_ptr(),
-            WINDOW_STYLE,
+            MAIN_WINDOW_STYLE,
             120,
             100,
             init_outer_w,
@@ -339,8 +378,12 @@ pub fn run_tray_app(
     }
 
     {
-        let (actual_dpi, cw, ch) =
-            sync_window_dpi_and_bounds(hwnd, COMPACT_CLIENT_LOGICAL_W, COMPACT_CLIENT_LOGICAL_H);
+        let (actual_dpi, cw, ch) = sync_window_dpi_and_bounds(
+            hwnd,
+            MAIN_WINDOW_STYLE,
+            COMPACT_CLIENT_LOGICAL_W,
+            COMPACT_CLIENT_LOGICAL_H,
+        );
         if let Some(st) = unsafe { host_state_mut(hwnd) } {
             st.dpi = actual_dpi;
             st.pixels_per_point = dpi_to_ppp(actual_dpi);
@@ -365,7 +408,13 @@ pub fn run_tray_app(
             SetForegroundWindow(hwnd);
         }
         if let Some(tdpi) = test_dpi {
-            send_test_dpi_change(hwnd, tdpi, COMPACT_CLIENT_LOGICAL_W, COMPACT_CLIENT_LOGICAL_H);
+            send_test_dpi_change(
+                hwnd,
+                MAIN_WINDOW_STYLE,
+                tdpi,
+                COMPACT_CLIENT_LOGICAL_W,
+                COMPACT_CLIENT_LOGICAL_H,
+            );
         }
         unsafe {
             InvalidateRect(hwnd, null(), 0);
@@ -378,6 +427,7 @@ pub fn run_tray_app(
             if let Some(tdpi) = test_dpi {
                 send_test_dpi_change(
                     ed_hwnd,
+                    EDITOR_WINDOW_STYLE,
                     tdpi,
                     EDITOR_CLIENT_LOGICAL_W,
                     EDITOR_CLIENT_LOGICAL_H,
@@ -508,7 +558,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
         let (init_w, init_h) = outer_size_for_dpi(
             EDITOR_CLIENT_LOGICAL_W,
             EDITOR_CLIENT_LOGICAL_H,
-            WINDOW_STYLE,
+            EDITOR_WINDOW_STYLE,
             init_dpi,
         );
         let ed_state = Box::new(WindowHostState {
@@ -534,7 +584,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
                 0,
                 class_name.as_ptr(),
                 title.as_ptr(),
-                WINDOW_STYLE,
+                EDITOR_WINDOW_STYLE,
                 160,
                 80,
                 init_w,
@@ -550,8 +600,12 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             return;
         }
         apply_dark_titlebar(created);
-        let (actual_dpi, cw, ch) =
-            sync_window_dpi_and_bounds(created, EDITOR_CLIENT_LOGICAL_W, EDITOR_CLIENT_LOGICAL_H);
+        let (actual_dpi, cw, ch) = sync_window_dpi_and_bounds(
+            created,
+            EDITOR_WINDOW_STYLE,
+            EDITOR_CLIENT_LOGICAL_W,
+            EDITOR_CLIENT_LOGICAL_H,
+        );
         if let Some(st) = unsafe { host_state_mut(created) } {
             st.dpi = actual_dpi;
             st.pixels_per_point = dpi_to_ppp(actual_dpi);
@@ -580,7 +634,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             let (outer_w, outer_h) = outer_size_for_dpi(
                 EDITOR_CLIENT_LOGICAL_W,
                 EDITOR_CLIENT_LOGICAL_H,
-                WINDOW_STYLE,
+                EDITOR_WINDOW_STYLE,
                 target_dpi,
             );
             st.dpi = target_dpi;
@@ -681,6 +735,57 @@ unsafe extern "system" fn wnd_proc(
 
     match msg {
         WM_ERASEBKGND => 1,
+        WM_GETMINMAXINFO => {
+            let st = unsafe { &*state_ptr };
+            if st.role == WindowRole::Main && lparam != 0 {
+                let mmi = unsafe { &mut *(lparam as *mut MinMaxInfo) };
+                let fixed_w = main_fixed_outer_width(st.dpi);
+                let min_h = outer_size_for_dpi(
+                    COMPACT_CLIENT_LOGICAL_W,
+                    COMPACT_CLIENT_MIN_LOGICAL_H,
+                    MAIN_WINDOW_STYLE,
+                    st.dpi,
+                )
+                .1;
+                mmi.pt_max_size.x = fixed_w;
+                mmi.pt_min_track_size.x = fixed_w;
+                mmi.pt_max_track_size.x = fixed_w;
+                mmi.pt_min_track_size.y = min_h;
+                mmi.pt_max_track_size.y = 2400;
+                return 0;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_SIZING => {
+            let st = unsafe { &*state_ptr };
+            if st.role == WindowRole::Main && lparam != 0 {
+                let rc = unsafe { &mut *(lparam as *mut RECT) };
+                let fixed_w = main_fixed_outer_width(st.dpi);
+                let edge = wparam as u32;
+                // Anchor right edge when dragging left border (WMSZ_LEFT=1, TOPLEFT=4, BOTTOMLEFT=7).
+                if matches!(edge, 1 | 4 | 7) {
+                    rc.left = rc.right - fixed_w;
+                } else {
+                    rc.right = rc.left + fixed_w;
+                }
+                return 1;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_NCHITTEST => {
+            let hit = unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            let st = unsafe { &*state_ptr };
+            if st.role == WindowRole::Main {
+                // Disable horizontal resize hit regions while keeping vertical top/bottom sizing active.
+                return match hit {
+                    10 | 11 => 18, // HTLEFT | HTRIGHT -> HTBORDER
+                    13 | 14 => 12, // HTTOPLEFT | HTTOPRIGHT -> HTTOP
+                    16 | 17 => 15, // HTBOTTOMLEFT | HTBOTTOMRIGHT -> HTBOTTOM
+                    other => other,
+                };
+            }
+            hit
+        }
         WM_ENTERSIZEMOVE => {
             let st = unsafe { &mut *state_ptr };
             st.in_size_move = true;
@@ -730,24 +835,35 @@ unsafe extern "system" fn wnd_proc(
             };
             // Drop &mut before SetWindowPos so any synchronous WM_SIZE does not alias state_ptr.
             if lparam != 0 {
-                let suggested = unsafe { &*(lparam as *const RECT) };
+                let mut rect = unsafe { *(lparam as *const RECT) };
+                if role == WindowRole::Main {
+                    rect.right = rect.left + main_fixed_outer_width(new_dpi);
+                }
                 unsafe {
                     SetWindowPos(
                         hwnd,
                         null_mut(),
-                        suggested.left,
-                        suggested.top,
-                        suggested.right - suggested.left,
-                        suggested.bottom - suggested.top,
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
             } else {
-                let (lw, lh) = match role {
-                    WindowRole::Main => (COMPACT_CLIENT_LOGICAL_W, COMPACT_CLIENT_LOGICAL_H),
-                    WindowRole::Editor => (EDITOR_CLIENT_LOGICAL_W, EDITOR_CLIENT_LOGICAL_H),
+                let (style, lw, lh) = match role {
+                    WindowRole::Main => (
+                        MAIN_WINDOW_STYLE,
+                        COMPACT_CLIENT_LOGICAL_W,
+                        COMPACT_CLIENT_LOGICAL_H,
+                    ),
+                    WindowRole::Editor => (
+                        EDITOR_WINDOW_STYLE,
+                        EDITOR_CLIENT_LOGICAL_W,
+                        EDITOR_CLIENT_LOGICAL_H,
+                    ),
                 };
-                let (ow, oh) = outer_size_for_dpi(lw, lh, WINDOW_STYLE, new_dpi);
+                let (ow, oh) = outer_size_for_dpi(lw, lh, style, new_dpi);
                 unsafe {
                     SetWindowPos(
                         hwnd,
@@ -1346,13 +1462,13 @@ mod tests {
         let (w100, h100) = outer_size_for_dpi(
             COMPACT_CLIENT_LOGICAL_W,
             COMPACT_CLIENT_LOGICAL_H,
-            WINDOW_STYLE,
+            MAIN_WINDOW_STYLE,
             96,
         );
         let (w150, h150) = outer_size_for_dpi(
             COMPACT_CLIENT_LOGICAL_W,
             COMPACT_CLIENT_LOGICAL_H,
-            WINDOW_STYLE,
+            MAIN_WINDOW_STYLE,
             144,
         );
         assert!(w150 > w100 + 180);

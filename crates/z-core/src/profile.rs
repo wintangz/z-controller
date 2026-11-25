@@ -111,6 +111,8 @@ pub struct ControllerBinding {
     pub profile_id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub show_live_input: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -230,12 +232,33 @@ impl AppConfig {
         }
     }
 
+    pub fn show_live_input_for_device(&self, key: &HardwareKey) -> bool {
+        self.bindings
+            .get(&key.canonical_id())
+            .is_none_or(|b| b.show_live_input)
+    }
+
     pub fn set_device_binding(&mut self, key: &HardwareKey, profile_id: String, enabled: bool) {
+        let show_live_input = self.show_live_input_for_device(key);
         self.bindings.insert(
             key.canonical_id(),
             ControllerBinding {
                 profile_id,
                 enabled,
+                show_live_input,
+            },
+        );
+    }
+
+    pub fn set_device_show_live_input(&mut self, key: &HardwareKey, show_live_input: bool) {
+        let (enabled, profile) = self.profile_for_device(key);
+        let profile_id = profile.id.clone();
+        self.bindings.insert(
+            key.canonical_id(),
+            ControllerBinding {
+                profile_id,
+                enabled,
+                show_live_input,
             },
         );
     }
@@ -280,6 +303,34 @@ mod tests {
         let (enabled, p) = loaded.profile_for_device(&key);
         assert!(enabled);
         assert_eq!(p.target, VirtualTargetKind::DualShock4);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn show_live_input_defaults_expanded_and_persists_across_restarts() {
+        let mut cfg = AppConfig::default();
+        let key = HardwareKey::new(0x057E, 0x2009, "NSP-COLLAPSE-TEST");
+        assert!(cfg.show_live_input_for_device(&key));
+
+        // Collapsing preserves enabled/profile defaults and survives save/reload.
+        cfg.set_device_show_live_input(&key, false);
+        assert!(!cfg.show_live_input_for_device(&key));
+        assert!(cfg.profile_for_device(&key).0);
+
+        // Changing profile/enabled preserves show_live_input=false.
+        cfg.set_device_binding(&key, "switch-pro".to_string(), false);
+        assert!(!cfg.show_live_input_for_device(&key));
+
+        let dir = std::env::temp_dir().join(format!("z_ctrl_collapse_test_{}", std::process::id()));
+        let file = dir.join("config.toml");
+        cfg.save_atomic(&file).unwrap();
+
+        let reloaded = AppConfig::load_or_default(&file);
+        assert!(!reloaded.show_live_input_for_device(&key));
+        let (enabled, prof) = reloaded.profile_for_device(&key);
+        assert!(!enabled);
+        assert_eq!(prof.id, "switch-pro");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
