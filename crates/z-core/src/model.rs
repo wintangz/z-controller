@@ -101,10 +101,50 @@ pub enum LogicalButton {
     DpadDown,
     DpadLeft,
     DpadRight,
+    Misc1,
+    RightPaddle1,
+    LeftPaddle1,
+    RightPaddle2,
+    LeftPaddle2,
+    Touchpad,
+    Misc2,
+    Misc3,
+    Misc4,
+    Misc5,
+    Misc6,
 }
 
 impl LogicalButton {
-    pub const ALL: [LogicalButton; 15] = [
+    pub const ALL: [LogicalButton; 26] = [
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::North,
+        Self::LeftShoulder,
+        Self::RightShoulder,
+        Self::Back,
+        Self::Start,
+        Self::Guide,
+        Self::LeftStick,
+        Self::RightStick,
+        Self::DpadUp,
+        Self::DpadDown,
+        Self::DpadLeft,
+        Self::DpadRight,
+        Self::Misc1,
+        Self::RightPaddle1,
+        Self::LeftPaddle1,
+        Self::RightPaddle2,
+        Self::LeftPaddle2,
+        Self::Touchpad,
+        Self::Misc2,
+        Self::Misc3,
+        Self::Misc4,
+        Self::Misc5,
+        Self::Misc6,
+    ];
+
+    pub const STANDARD: [LogicalButton; 15] = [
         Self::South,
         Self::East,
         Self::West,
@@ -122,27 +162,208 @@ impl LogicalButton {
         Self::DpadRight,
     ];
 
+    pub const EXTRA: [LogicalButton; 11] = [
+        Self::Misc1,
+        Self::Touchpad,
+        Self::RightPaddle1,
+        Self::LeftPaddle1,
+        Self::RightPaddle2,
+        Self::LeftPaddle2,
+        Self::Misc2,
+        Self::Misc3,
+        Self::Misc4,
+        Self::Misc5,
+        Self::Misc6,
+    ];
+
+    /// Buttons that virtual ViGEm outputs (Xbox 360 / DualShock 4) can emit directly.
+    pub const VIRTUAL_TARGETS: [LogicalButton; 16] = [
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::North,
+        Self::LeftShoulder,
+        Self::RightShoulder,
+        Self::Back,
+        Self::Start,
+        Self::Guide,
+        Self::LeftStick,
+        Self::RightStick,
+        Self::DpadUp,
+        Self::DpadDown,
+        Self::DpadLeft,
+        Self::DpadRight,
+        Self::Touchpad,
+    ];
+
     pub fn bit(self) -> u32 {
         1u32 << (self as u32)
     }
 
+    pub fn is_extra(self) -> bool {
+        !matches!(
+            self,
+            Self::South
+                | Self::East
+                | Self::West
+                | Self::North
+                | Self::LeftShoulder
+                | Self::RightShoulder
+                | Self::Back
+                | Self::Start
+                | Self::Guide
+                | Self::LeftStick
+                | Self::RightStick
+                | Self::DpadUp
+                | Self::DpadDown
+                | Self::DpadLeft
+                | Self::DpadRight
+        )
+    }
+
     pub fn short_label(self) -> &'static str {
-        match self {
-            Self::South => "South (A/B)",
-            Self::East => "East (B/A)",
-            Self::West => "West (X/Y)",
-            Self::North => "North (Y/X)",
-            Self::LeftShoulder => "LB / L1",
-            Self::RightShoulder => "RB / R1",
-            Self::Back => "Back / -",
-            Self::Start => "Start / +",
-            Self::Guide => "Guide / Home",
-            Self::LeftStick => "LS / L3",
-            Self::RightStick => "RS / R3",
-            Self::DpadUp => "D-Up",
-            Self::DpadDown => "D-Down",
-            Self::DpadLeft => "D-Left",
-            Self::DpadRight => "D-Right",
+        self.family_label(ControllerFamily::Generic)
+    }
+
+    pub fn family_label(self, family: ControllerFamily) -> &'static str {
+        match (family, self) {
+            (ControllerFamily::Xbox, Self::South) => "A (South)",
+            (ControllerFamily::Xbox, Self::East) => "B (East)",
+            (ControllerFamily::Xbox, Self::West) => "X (West)",
+            (ControllerFamily::Xbox, Self::North) => "Y (North)",
+            (ControllerFamily::Xbox, Self::LeftShoulder) => "LB",
+            (ControllerFamily::Xbox, Self::RightShoulder) => "RB",
+            (ControllerFamily::Xbox, Self::Back) => "View",
+            (ControllerFamily::Xbox, Self::Start) => "Menu",
+            (ControllerFamily::Xbox, Self::Guide) => "Xbox",
+            (ControllerFamily::Xbox, Self::LeftStick) => "LS Click",
+            (ControllerFamily::Xbox, Self::RightStick) => "RS Click",
+            (ControllerFamily::Xbox, Self::Misc1) => "Share",
+
+            (ControllerFamily::Sony, Self::South) => "Cross",
+            (ControllerFamily::Sony, Self::East) => "Circle",
+            (ControllerFamily::Sony, Self::West) => "Square",
+            (ControllerFamily::Sony, Self::North) => "Triangle",
+            (ControllerFamily::Sony, Self::LeftShoulder) => "L1",
+            (ControllerFamily::Sony, Self::RightShoulder) => "R1",
+            (ControllerFamily::Sony, Self::Back) => "Create / Share",
+            (ControllerFamily::Sony, Self::Start) => "Options",
+            (ControllerFamily::Sony, Self::Guide) => "PS",
+            (ControllerFamily::Sony, Self::LeftStick) => "L3",
+            (ControllerFamily::Sony, Self::RightStick) => "R3",
+            (ControllerFamily::Sony, Self::Misc1) => "Mute / Mic",
+            (ControllerFamily::Sony, Self::Touchpad) => "Touchpad Click",
+
+            (ControllerFamily::Nintendo, Self::South) => "B (South)",
+            (ControllerFamily::Nintendo, Self::East) => "A (East)",
+            (ControllerFamily::Nintendo, Self::West) => "Y (West)",
+            (ControllerFamily::Nintendo, Self::North) => "X (North)",
+            (ControllerFamily::Nintendo, Self::LeftShoulder) => "L",
+            (ControllerFamily::Nintendo, Self::RightShoulder) => "R",
+            (ControllerFamily::Nintendo, Self::Back) => "- (Minus)",
+            (ControllerFamily::Nintendo, Self::Start) => "+ (Plus)",
+            (ControllerFamily::Nintendo, Self::Guide) => "Home",
+            (ControllerFamily::Nintendo, Self::LeftStick) => "L3",
+            (ControllerFamily::Nintendo, Self::RightStick) => "R3",
+            (ControllerFamily::Nintendo, Self::Misc1) => "Capture",
+
+            (_, Self::South) => "South (A/B)",
+            (_, Self::East) => "East (B/A)",
+            (_, Self::West) => "West (X/Y)",
+            (_, Self::North) => "North (Y/X)",
+            (_, Self::LeftShoulder) => "LB / L1",
+            (_, Self::RightShoulder) => "RB / R1",
+            (_, Self::Back) => "Back / -",
+            (_, Self::Start) => "Start / +",
+            (_, Self::Guide) => "Guide / Home",
+            (_, Self::LeftStick) => "LS / L3",
+            (_, Self::RightStick) => "RS / R3",
+            (_, Self::DpadUp) => "D-Up",
+            (_, Self::DpadDown) => "D-Down",
+            (_, Self::DpadLeft) => "D-Left",
+            (_, Self::DpadRight) => "D-Right",
+            (_, Self::Misc1) => "Misc1 (Cap/Shr)",
+            (_, Self::RightPaddle1) => "Paddle R4 (P1)",
+            (_, Self::LeftPaddle1) => "Paddle L4 (P3)",
+            (_, Self::RightPaddle2) => "Paddle R5 (P2)",
+            (_, Self::LeftPaddle2) => "Paddle L5 (P4)",
+            (_, Self::Touchpad) => "Touchpad Click",
+            (_, Self::Misc2) => "Misc 2",
+            (_, Self::Misc3) => "Misc 3",
+            (_, Self::Misc4) => "Misc 4",
+            (_, Self::Misc5) => "Misc 5",
+            (_, Self::Misc6) => "Misc 6",
+        }
+    }
+
+    pub fn family_chip(self, family: ControllerFamily) -> &'static str {
+        match (family, self) {
+            (ControllerFamily::Xbox, Self::South) => "A",
+            (ControllerFamily::Xbox, Self::East) => "B",
+            (ControllerFamily::Xbox, Self::West) => "X",
+            (ControllerFamily::Xbox, Self::North) => "Y",
+            (ControllerFamily::Xbox, Self::LeftShoulder) => "LB",
+            (ControllerFamily::Xbox, Self::RightShoulder) => "RB",
+            (ControllerFamily::Xbox, Self::Back) => "Vw",
+            (ControllerFamily::Xbox, Self::Start) => "Mn",
+            (ControllerFamily::Xbox, Self::Guide) => "Xb",
+            (ControllerFamily::Xbox, Self::LeftStick) => "LS",
+            (ControllerFamily::Xbox, Self::RightStick) => "RS",
+            (ControllerFamily::Xbox, Self::Misc1) => "Shr",
+
+            (ControllerFamily::Sony, Self::South) => "Cr",
+            (ControllerFamily::Sony, Self::East) => "Ci",
+            (ControllerFamily::Sony, Self::West) => "Sq",
+            (ControllerFamily::Sony, Self::North) => "Tr",
+            (ControllerFamily::Sony, Self::LeftShoulder) => "L1",
+            (ControllerFamily::Sony, Self::RightShoulder) => "R1",
+            (ControllerFamily::Sony, Self::Back) => "Sh",
+            (ControllerFamily::Sony, Self::Start) => "Op",
+            (ControllerFamily::Sony, Self::Guide) => "PS",
+            (ControllerFamily::Sony, Self::LeftStick) => "L3",
+            (ControllerFamily::Sony, Self::RightStick) => "R3",
+            (ControllerFamily::Sony, Self::Misc1) => "Mic",
+            (ControllerFamily::Sony, Self::Touchpad) => "TP",
+
+            (ControllerFamily::Nintendo, Self::South) => "B",
+            (ControllerFamily::Nintendo, Self::East) => "A",
+            (ControllerFamily::Nintendo, Self::West) => "Y",
+            (ControllerFamily::Nintendo, Self::North) => "X",
+            (ControllerFamily::Nintendo, Self::LeftShoulder) => "L",
+            (ControllerFamily::Nintendo, Self::RightShoulder) => "R",
+            (ControllerFamily::Nintendo, Self::Back) => "-",
+            (ControllerFamily::Nintendo, Self::Start) => "+",
+            (ControllerFamily::Nintendo, Self::Guide) => "Hm",
+            (ControllerFamily::Nintendo, Self::LeftStick) => "L3",
+            (ControllerFamily::Nintendo, Self::RightStick) => "R3",
+            (ControllerFamily::Nintendo, Self::Misc1) => "Cap",
+
+            (_, Self::South) => "A",
+            (_, Self::East) => "B",
+            (_, Self::West) => "X",
+            (_, Self::North) => "Y",
+            (_, Self::LeftShoulder) => "LB",
+            (_, Self::RightShoulder) => "RB",
+            (_, Self::Back) => "Bk",
+            (_, Self::Start) => "St",
+            (_, Self::Guide) => "Gd",
+            (_, Self::LeftStick) => "L3",
+            (_, Self::RightStick) => "R3",
+            (_, Self::DpadUp) => "Up",
+            (_, Self::DpadDown) => "Dn",
+            (_, Self::DpadLeft) => "Lt",
+            (_, Self::DpadRight) => "Rt",
+            (_, Self::Misc1) => "M1",
+            (_, Self::RightPaddle1) => "R4",
+            (_, Self::LeftPaddle1) => "L4",
+            (_, Self::RightPaddle2) => "R5",
+            (_, Self::LeftPaddle2) => "L5",
+            (_, Self::Touchpad) => "TP",
+            (_, Self::Misc2) => "M2",
+            (_, Self::Misc3) => "M3",
+            (_, Self::Misc4) => "M4",
+            (_, Self::Misc5) => "M5",
+            (_, Self::Misc6) => "M6",
         }
     }
 }

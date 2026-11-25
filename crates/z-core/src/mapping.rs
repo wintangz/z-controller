@@ -209,6 +209,9 @@ pub fn map_physical_to_virtual(
             if pressed(LogicalButton::Guide) {
                 special |= 1 << 0; // PS
             }
+            if pressed(LogicalButton::Touchpad) {
+                special |= 1 << 1; // DS4 Touchpad click
+            }
 
             VirtualOutputReport::DualShock4(Ds4OutputState {
                 thumb_lx: i16_axis_to_u8(lx),
@@ -244,7 +247,7 @@ mod tests {
 
     #[test]
     fn x360_inverts_y_safely_and_ds4_preserves_y_and_neutral_dpad() {
-        let mut profile_x = Profile::default_x360();
+        let mut profile_x = Profile::builtin_xbox360();
         profile_x.left_deadzone = 0.0;
         profile_x.right_deadzone = 0.0;
 
@@ -264,10 +267,13 @@ mod tests {
         assert_eq!(xrep.thumb_ry, -32767, "SDL DOWN (+32767) must map to X360 -32767");
         assert_eq!(xrep.buttons, 0x1000); // A
 
-        let mut profile_ds4 = Profile::default_ds4();
+        let mut profile_ds4 = Profile::builtin_dualsense();
         profile_ds4.left_deadzone = 0.0;
         profile_ds4.right_deadzone = 0.0;
-        let VirtualOutputReport::DualShock4(drep) = map_physical_to_virtual(&phys, &profile_ds4)
+        let mut phys_ds4 = phys;
+        phys_ds4.set_button(LogicalButton::Touchpad, true);
+        let VirtualOutputReport::DualShock4(drep) =
+            map_physical_to_virtual(&phys_ds4, &profile_ds4)
         else {
             panic!("expected DualShock4");
         };
@@ -276,19 +282,24 @@ mod tests {
         assert_eq!(drep.thumb_lx, 128);
         assert_eq!(drep.buttons & 0x000F, 8, "DS4 released D-Pad must be 8, never 0");
         assert_ne!(drep.buttons & (1 << 5), 0); // CROSS
+        assert_ne!(drep.special & (1 << 1), 0, "DS4 Touchpad click bit must map cleanly");
     }
 
     #[test]
-    fn swap_ab_xy_and_button_remap() {
-        let mut p = Profile::default_x360();
+    fn swap_ab_xy_and_misc_paddle_button_remap() {
+        let mut p = Profile::builtin_xbox360();
         p.swap_ab_xy = true;
         p.button_remap.insert(LogicalButton::Back, Some(LogicalButton::Guide));
         p.button_remap.insert(LogicalButton::Start, None); // unbound
+        p.button_remap.insert(LogicalButton::Misc1, Some(LogicalButton::Start));
+        p.button_remap.insert(LogicalButton::RightPaddle1, Some(LogicalButton::North));
 
         let mut phys = PhysicalGamepadState::default();
         phys.set_button(LogicalButton::South, true);
         phys.set_button(LogicalButton::Back, true);
         phys.set_button(LogicalButton::Start, true);
+        phys.set_button(LogicalButton::Misc1, true);
+        phys.set_button(LogicalButton::RightPaddle1, true);
 
         let VirtualOutputReport::Xbox360(rep) = map_physical_to_virtual(&phys, &p) else {
             panic!("expected x360");
@@ -296,6 +307,7 @@ mod tests {
         assert_ne!(rep.buttons & 0x2000, 0, "South swapped to East (B)");
         assert_eq!(rep.buttons & 0x1000, 0, "A must not be pressed");
         assert_ne!(rep.buttons & 0x0400, 0, "Back remapped to Guide");
-        assert_eq!(rep.buttons & 0x0010, 0, "Start unbound");
+        assert_ne!(rep.buttons & 0x0010, 0, "Misc1 Capture/Share remapped to Start");
+        assert_ne!(rep.buttons & 0x8000, 0, "RightPaddle1 remapped to North (Y)");
     }
 }

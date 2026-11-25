@@ -7,13 +7,13 @@ use egui::{
     Rounding, Stroke, TextStyle, Vec2,
 };
 use z_core::battery::BatteryStatus;
-use z_core::model::{DisconnectPolicy, LogicalButton, VirtualTargetKind};
+use z_core::model::{ControllerFamily, DisconnectPolicy, LogicalButton, VirtualTargetKind};
 use z_core::profile::Profile;
 use z_platform_windows::drivers::query_process_memory_bytes;
 
+use crate::diagram::draw_controller_diagram;
 use crate::engine::{
-    ControllerSnapshot, EngineCommand, EngineHandle, EngineSnapshot, PhysicalSnapshot,
-    VirtualOutputSnapshot,
+    EngineCommand, EngineHandle, EngineSnapshot, PhysicalSnapshot,
 };
 
 // Modern neon-on-black palette (neon strictly for accents, edges, bars, and dots — never large fills or body text).
@@ -31,31 +31,40 @@ pub const NEON_PINK: Color32 = Color32::from_rgb(255, 92, 168); // #FF5CA8
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(237, 237, 242); // #EDEDF2
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 176); // #9A9AB0
 
+// Consistent 4 / 8 / 12 / 16 spacing scale applied uniformly across all panels, cards, and grids.
+pub const SPACE_XS: f32 = 4.0;
+pub const SPACE_SM: f32 = 8.0;
+pub const SPACE_MD: f32 = 12.0;
+#[allow(dead_code)]
+pub const SPACE_LG: f32 = 16.0;
+
 const SEGOE_UI_FONT_PATH: &str = r"C:\Windows\Fonts\segoeui.ttf";
 const CARD_ROUNDING: f32 = 8.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MainTab {
-    ProfileEditor,
-    LiveTest,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiAction {
+    OpenProfileEditor {
+        controller_id: String,
+        profile_id: String,
+    },
 }
 
 pub struct AppUiState {
     pub selected_controller: Option<String>,
-    pub active_tab: MainTab,
     pub editing_profile_id: Option<String>,
     pub draft_profile: Option<Profile>,
     pub draft_dirty: bool,
+    pub selected_diagram_button: Option<LogicalButton>,
 }
 
 impl Default for AppUiState {
     fn default() -> Self {
         Self {
             selected_controller: None,
-            active_tab: MainTab::ProfileEditor,
             editing_profile_id: None,
             draft_profile: None,
             draft_dirty: false,
+            selected_diagram_button: Some(LogicalButton::South),
         }
     }
 }
@@ -74,9 +83,9 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
 
     let mut style = (*ctx.style()).clone();
     style.text_styles = BTreeMap::from([
-        (TextStyle::Heading, FontId::new(17.5, FontFamily::Proportional)),
-        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
-        (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Heading, FontId::new(16.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+        (TextStyle::Button, FontId::new(12.5, FontFamily::Proportional)),
         (TextStyle::Small, FontId::new(11.5, FontFamily::Proportional)),
         (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
     ]);
@@ -129,8 +138,8 @@ pub fn configure_neon_theme_and_fonts(ctx: &egui::Context) {
     visuals.selection.stroke = Stroke::new(1.0_f32, NEON_VIOLET);
 
     style.visuals = visuals;
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.spacing.item_spacing = Vec2::new(SPACE_SM, SPACE_SM);
+    style.spacing.button_padding = Vec2::new(SPACE_MD, SPACE_XS + 1.0);
     ctx.set_style(style);
 }
 
@@ -149,6 +158,20 @@ pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let g = (a.g() as f32 + (b.g() as f32 - a.g() as f32) * u).round() as u8;
     let bl = (a.b() as f32 + (b.b() as f32 - a.b() as f32) * u).round() as u8;
     Color32::from_rgb(r, g, bl)
+}
+
+#[inline]
+pub fn normalize_stick_axis(raw: i16) -> f32 {
+    (raw as f32 / 32767.0).clamp(-1.0, 1.0)
+}
+
+#[inline]
+pub fn normalize_trigger_axis(raw: i16) -> f32 {
+    if raw <= 0 {
+        0.0
+    } else {
+        (raw as f32 / 32767.0).clamp(0.0, 1.0)
+    }
 }
 
 fn push_rounded_rect_perimeter(rect: Rect, radius: f32, out: &mut Vec<(Pos2, Vec2)>) {
@@ -258,6 +281,13 @@ fn paint_active_card_neon_edge_and_glow(painter: &egui::Painter, rect: Rect, rou
     );
 }
 
+fn draw_aligned_divider(ui: &mut egui::Ui, left: f32, right: f32) {
+    let y = ui.cursor().top();
+    ui.painter()
+        .line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(1.0_f32, SUBTLE_BORDER));
+    ui.add_space(SPACE_SM);
+}
+
 fn draw_status_dot(ui: &mut egui::Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);
@@ -265,8 +295,9 @@ fn draw_status_dot(ui: &mut egui::Ui, color: Color32) {
 
 fn draw_battery_bar(ui: &mut egui::Ui, battery: &z_core::battery::BatteryReading) {
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         ui.label(RichText::new("Battery:").small().color(TEXT_MUTED));
-        let bar_size = Vec2::new(112.0, 8.0);
+        let bar_size = Vec2::new(124.0, 8.0);
         let (rect, _) = ui.allocate_exact_size(bar_size, egui::Sense::hover());
         let p = ui.painter();
         p.rect_filled(rect, Rounding::same(4.0), BG_NEAR_BLACK);
@@ -292,17 +323,22 @@ fn draw_battery_bar(ui: &mut egui::Ui, battery: &z_core::battery::BatteryReading
     });
 }
 
-pub fn draw_app_ui(ctx: &egui::Context, state: &mut AppUiState, engine: &EngineHandle) {
+pub fn draw_compact_main_ui(
+    ctx: &egui::Context,
+    state: &mut AppUiState,
+    engine: &EngineHandle,
+) -> Vec<UiAction> {
     let snap = engine.snapshot();
-    draw_app_ui_snapshot(ctx, state, &snap, |cmd| engine.send(cmd));
+    draw_compact_main_snapshot(ctx, state, &snap, |cmd| engine.send(cmd))
 }
 
-pub fn draw_app_ui_snapshot(
+pub fn draw_compact_main_snapshot(
     ctx: &egui::Context,
     state: &mut AppUiState,
     snap: &EngineSnapshot,
     mut send: impl FnMut(EngineCommand),
-) {
+) -> Vec<UiAction> {
+    let mut actions = Vec::new();
     if state.selected_controller.is_none()
         || !snap
             .controllers
@@ -312,116 +348,739 @@ pub fn draw_app_ui_snapshot(
         state.selected_controller = snap.controllers.first().map(|c| c.canonical_id.clone());
     }
 
-    let selected_ctrl = snap
-        .controllers
-        .iter()
-        .find(|c| Some(&c.canonical_id) == state.selected_controller.as_ref())
-        .cloned();
-
-    let desired_profile_id = selected_ctrl
-        .as_ref()
-        .map(|c| c.profile_id.clone())
-        .or_else(|| Some(snap.config.default_profile_id.clone()));
-
-    if let Some(pid) = desired_profile_id {
-        if state.editing_profile_id.as_deref() != Some(&pid) && !state.draft_dirty {
-            state.editing_profile_id = Some(pid.clone());
-            state.draft_profile = Some(snap.config.profile_by_id(&pid).clone());
-        }
-    }
-
     // Bottom status bar (driver readiness, HidHide lock warnings, live RAM readout — NO popups)
-    egui::TopBottomPanel::bottom("status_bar")
+    egui::TopBottomPanel::bottom("compact_status_bar")
         .exact_height(36.0)
         .frame(
             egui::Frame::none()
                 .fill(PANEL_SURFACE)
-                .inner_margin(Margin::symmetric(12.0, 6.0)),
+                .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
-            let r = ui.max_rect();
+            let sr = ctx.screen_rect();
+            let top_y = ui.max_rect().top() - SPACE_SM;
             ui.painter().line_segment(
-                [Pos2::new(r.left() - 12.0, r.top() - 6.0), Pos2::new(r.right() + 12.0, r.top() - 6.0)],
+                [Pos2::new(sr.left(), top_y), Pos2::new(sr.right(), top_y)],
                 Stroke::new(1.0_f32, SUBTLE_BORDER),
             );
             draw_status_bar(ui, snap, &mut send);
         });
 
-    // Left sidebar: Controller list with view-only battery & manual profile selector
-    egui::SidePanel::left("controllers_panel")
-        .resizable(false)
-        .exact_width(322.0)
-        .frame(
-            egui::Frame::none()
-                .fill(BG_NEAR_BLACK)
-                .inner_margin(Margin::symmetric(8.0, 8.0)),
-        )
-        .show(ctx, |ui| {
-            draw_controller_list(ui, state, snap, &mut send);
-        });
-
-    // Main area: Tabs for Profile Editor and Live Input Test
     egui::CentralPanel::default()
         .frame(
             egui::Frame::none()
                 .fill(BG_NEAR_BLACK)
-                .inner_margin(Margin::same(8.0)),
+                .inner_margin(Margin::same(SPACE_MD)),
         )
         .show(ctx, |ui| {
-            egui::Frame::none()
-                .fill(PANEL_SURFACE)
-                .rounding(CARD_ROUNDING)
-                .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
-                .inner_margin(Margin::same(14.0))
-                .show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    ui.horizontal(|ui| {
-                        draw_tab_button(ui, &mut state.active_tab, MainTab::ProfileEditor, "Profile Editor");
-                        ui.add_space(6.0);
-                        draw_tab_button(ui, &mut state.active_tab, MainTab::LiveTest, "Live Input Test");
-                    });
-                    ui.add_space(4.0);
-                    let sep_y = ui.cursor().top();
-                    let avail = ui.available_rect_before_wrap();
-                    ui.painter().line_segment(
-                        [Pos2::new(avail.left(), sep_y), Pos2::new(avail.right(), sep_y)],
-                        Stroke::new(1.0_f32, SUBTLE_BORDER),
-                    );
-                    ui.add_space(8.0);
-
-                    match state.active_tab {
-                        MainTab::ProfileEditor => {
-                            draw_profile_editor(ui, state, snap, &mut send);
-                        }
-                        MainTab::LiveTest => draw_live_test(ui, selected_ctrl.as_ref()),
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new("Controllers").color(TEXT_PRIMARY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Refresh").clicked() {
+                        send(EngineCommand::RefreshStatus);
                     }
                 });
+            });
+            ui.add_space(SPACE_XS);
+            let bounds = ui.available_rect_before_wrap();
+            draw_aligned_divider(ui, bounds.left(), bounds.right());
+
+            if snap.controllers.is_empty() {
+                egui::Frame::none()
+                    .fill(PANEL_SURFACE)
+                    .rounding(CARD_ROUNDING)
+                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .inner_margin(Margin::same(SPACE_MD))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            RichText::new("No physical controllers detected.").color(TEXT_PRIMARY),
+                        );
+                        ui.add_space(SPACE_XS);
+                        ui.label(
+                            RichText::new("Connect a controller via Bluetooth or USB.")
+                                .small()
+                                .color(TEXT_MUTED),
+                        );
+                    });
+                return;
+            }
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Inner 4px/8px inset keeps active cards' 4px static outer glow unclipped while aligning card edges.
+                egui::Frame::none()
+                    .inner_margin(Margin::symmetric(SPACE_XS + 2.0, SPACE_XS + 2.0))
+                    .show(ui, |ui| {
+                        let card_inner_w = (ui.available_width() - SPACE_MD * 2.0).max(280.0);
+                        for ctrl in &snap.controllers {
+                            let is_selected =
+                                state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
+                            let card_fill = if is_selected {
+                                WIDGET_SURFACE
+                            } else {
+                                PANEL_SURFACE
+                            };
+                            let card_stroke = if ctrl.virtual_active {
+                                Stroke::NONE
+                            } else {
+                                Stroke::new(
+                                    1.0_f32,
+                                    if is_selected { NEON_VIOLET } else { SUBTLE_BORDER },
+                                )
+                            };
+
+                            let card_resp = egui::Frame::none()
+                                .fill(card_fill)
+                                .rounding(CARD_ROUNDING)
+                                .inner_margin(Margin::same(SPACE_MD))
+                                .stroke(card_stroke)
+                                .show(ui, |ui| {
+                                    ui.set_min_width(card_inner_w);
+                                    ui.spacing_mut().item_spacing.y = SPACE_XS + 2.0;
+
+                                    let header_resp = ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                        let dot =
+                                            if ctrl.connected { NEON_GREEN } else { TEXT_MUTED };
+                                        draw_status_dot(ui, dot);
+                                        ui.label(
+                                            RichText::new(&ctrl.name).strong().color(TEXT_PRIMARY),
+                                        );
+                                    });
+                                    if ui
+                                        .interact(
+                                            header_resp.response.rect,
+                                            ui.id().with(&ctrl.canonical_id),
+                                            egui::Sense::click(),
+                                        )
+                                        .clicked()
+                                    {
+                                        state.selected_controller =
+                                            Some(ctrl.canonical_id.clone());
+                                    }
+
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} | {} | {:04X}:{:04X}",
+                                            ctrl.family.label(),
+                                            ctrl.transport.label(),
+                                            ctrl.key.vid,
+                                            ctrl.key.pid
+                                        ))
+                                        .small()
+                                        .color(TEXT_MUTED),
+                                    );
+
+                                    draw_battery_bar(ui, &ctrl.battery);
+
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                        let mut enabled = ctrl.enabled;
+                                        if ui.checkbox(&mut enabled, "Active").changed() {
+                                            send(EngineCommand::SetDeviceEnabled {
+                                                key: ctrl.key.clone(),
+                                                enabled,
+                                            });
+                                        }
+                                        if ctrl.virtual_active {
+                                            egui::Frame::none()
+                                                .fill(Color32::from_rgb(24, 20, 40))
+                                                .rounding(Rounding::same(4.0))
+                                                .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
+                                                .inner_margin(Margin::symmetric(SPACE_SM, 2.0))
+                                                .show(ui, |ui| {
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "-> {}",
+                                                            ctrl.target_kind.label()
+                                                        ))
+                                                        .small()
+                                                        .color(TEXT_PRIMARY),
+                                                    );
+                                                });
+                                        }
+                                        let cloak_dot =
+                                            if ctrl.cloaked { NEON_GREEN } else { TEXT_MUTED };
+                                        draw_status_dot(ui, cloak_dot);
+                                        ui.label(
+                                            RichText::new(if ctrl.cloaked {
+                                                "Cloaked"
+                                            } else {
+                                                "Visible"
+                                            })
+                                            .small()
+                                            .color(if ctrl.cloaked {
+                                                TEXT_PRIMARY
+                                            } else {
+                                                TEXT_MUTED
+                                            }),
+                                        );
+                                    });
+
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                        ui.label(
+                                            RichText::new("Profile:").small().color(TEXT_MUTED),
+                                        );
+                                        egui::ComboBox::from_id_salt((
+                                            "ctrl_prof",
+                                            &ctrl.canonical_id,
+                                        ))
+                                        .width(172.0)
+                                        .selected_text(
+                                            RichText::new(&ctrl.profile_name).color(TEXT_PRIMARY),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for p in &snap.config.profiles {
+                                                let item_resp = ui.selectable_label(
+                                                    ctrl.profile_id == p.id,
+                                                    &p.name,
+                                                );
+                                                if item_resp.clicked() {
+                                                    send(EngineCommand::SelectDeviceProfile {
+                                                        key: ctrl.key.clone(),
+                                                        profile_id: p.id.clone(),
+                                                    });
+                                                    state.selected_controller =
+                                                        Some(ctrl.canonical_id.clone());
+                                                    state.editing_profile_id = Some(p.id.clone());
+                                                    state.draft_profile = Some(p.clone());
+                                                    state.draft_dirty = false;
+                                                }
+                                            }
+                                        });
+
+                                        let edit_btn = egui::Button::new(
+                                            RichText::new("Edit Profile").small().color(TEXT_PRIMARY),
+                                        )
+                                        .fill(Color32::from_rgb(27, 22, 42))
+                                        .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
+                                        .rounding(Rounding::same(6.0));
+                                        if ui.add(edit_btn).clicked() {
+                                            state.selected_controller =
+                                                Some(ctrl.canonical_id.clone());
+                                            state.editing_profile_id =
+                                                Some(ctrl.profile_id.clone());
+                                            state.draft_profile = Some(
+                                                snap.config.profile_by_id(&ctrl.profile_id).clone(),
+                                            );
+                                            state.draft_dirty = false;
+                                            actions.push(UiAction::OpenProfileEditor {
+                                                controller_id: ctrl.canonical_id.clone(),
+                                                profile_id: ctrl.profile_id.clone(),
+                                            });
+                                        }
+                                    });
+
+                                    draw_card_live_status(
+                                        ui,
+                                        ctrl.family,
+                                        ctrl.present_buttons_mask,
+                                        &ctrl.physical_state,
+                                        card_inner_w,
+                                    );
+                                });
+
+                            if ctrl.virtual_active {
+                                paint_active_card_neon_edge_and_glow(
+                                    ui.painter(),
+                                    card_resp.response.rect,
+                                    CARD_ROUNDING,
+                                );
+                            }
+
+                            ui.add_space(SPACE_MD);
+                        }
+                    });
+            });
+        });
+
+    actions
+}
+
+pub fn draw_profile_editor_ui(
+    ctx: &egui::Context,
+    state: &mut AppUiState,
+    engine: &EngineHandle,
+) {
+    let snap = engine.snapshot();
+    draw_profile_editor_snapshot(ctx, state, &snap, |cmd| engine.send(cmd));
+}
+
+pub fn draw_profile_editor_snapshot(
+    ctx: &egui::Context,
+    state: &mut AppUiState,
+    snap: &EngineSnapshot,
+    mut send: impl FnMut(EngineCommand),
+) {
+    if state.selected_controller.is_none() {
+        state.selected_controller = snap.controllers.first().map(|c| c.canonical_id.clone());
+    }
+    if state.editing_profile_id.is_none() || !state.draft_dirty && state.draft_profile.is_none() {
+        let pid = snap
+            .controllers
+            .iter()
+            .find(|c| Some(&c.canonical_id) == state.selected_controller.as_ref())
+            .map(|c| c.profile_id.clone())
+            .unwrap_or_else(|| snap.config.default_profile_id.clone());
+        state.editing_profile_id = Some(pid.clone());
+        state.draft_profile = Some(snap.config.profile_by_id(&pid).clone());
+    }
+
+    let live_ctrl = snap
+        .controllers
+        .iter()
+        .find(|c| {
+            Some(&c.canonical_id) == state.selected_controller.as_ref()
+                && state.editing_profile_id.as_deref() == Some(c.profile_id.as_str())
+        })
+        .or_else(|| {
+            snap.controllers
+                .iter()
+                .find(|c| Some(&c.canonical_id) == state.selected_controller.as_ref())
+        })
+        .or_else(|| {
+            snap.controllers.iter().find(|c| {
+                c.physical_state.buttons_mask != 0
+                    || c.physical_state.left_x != 0
+                    || c.physical_state.left_y != 0
+            })
+        })
+        .or_else(|| snap.controllers.first())
+        .cloned();
+
+    // Top Editor Toolbar
+    egui::TopBottomPanel::top("editor_toolbar")
+        .exact_height(46.0)
+        .frame(
+            egui::Frame::none()
+                .fill(PANEL_SURFACE)
+                .inner_margin(Margin::symmetric(SPACE_MD, SPACE_SM)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_SM;
+                ui.label(RichText::new("Editing Profile:").color(TEXT_MUTED));
+                let cur_id = state
+                    .editing_profile_id
+                    .clone()
+                    .unwrap_or_else(|| snap.config.default_profile_id.clone());
+                let cur_name = state
+                    .draft_profile
+                    .as_ref()
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Select");
+                egui::ComboBox::from_id_salt("editor_profile_selector")
+                    .width(230.0)
+                    .selected_text(RichText::new(cur_name).color(TEXT_PRIMARY))
+                    .show_ui(ui, |ui| {
+                        for p in &snap.config.profiles {
+                            if ui.selectable_label(p.id == cur_id, &p.name).clicked() {
+                                state.editing_profile_id = Some(p.id.clone());
+                                state.draft_profile = Some(p.clone());
+                                state.draft_dirty = false;
+                            }
+                        }
+                    });
+
+                if ui.button("+ New").clicked() {
+                    let n = snap.config.profiles.len() + 1;
+                    let mut new_prof = Profile::builtin_xbox360();
+                    new_prof.id = format!("custom-{n}");
+                    new_prof.name = format!("Custom Profile {n}");
+                    state.editing_profile_id = Some(new_prof.id.clone());
+                    state.draft_profile = Some(new_prof.clone());
+                    state.draft_dirty = false;
+                    send(EngineCommand::UpsertProfile(new_prof));
+                }
+
+                if snap.config.profiles.len() > 1 {
+                    if let Some(id) = &state.editing_profile_id {
+                        if !Profile::is_builtin_id(id) && ui.button("Delete").clicked() {
+                            send(EngineCommand::DeleteProfile(id.clone()));
+                            let fallback = snap.config.default_profile_id.clone();
+                            state.editing_profile_id = Some(fallback.clone());
+                            state.draft_profile = Some(snap.config.profile_by_id(&fallback).clone());
+                            state.draft_dirty = false;
+                        }
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(prof) = state.draft_profile.as_ref() {
+                        let btn_text = if state.draft_dirty {
+                            "Apply & Save *"
+                        } else {
+                            "Apply & Save"
+                        };
+                        let accent = if state.draft_dirty { NEON_PINK } else { NEON_VIOLET };
+                        let save_btn =
+                            egui::Button::new(RichText::new(btn_text).strong().color(TEXT_PRIMARY))
+                                .fill(Color32::from_rgb(27, 22, 42))
+                                .stroke(Stroke::new(1.0_f32, accent))
+                                .rounding(Rounding::same(6.0));
+                        if ui.add(save_btn).clicked() {
+                            send(EngineCommand::UpsertProfile(prof.clone()));
+                            state.draft_dirty = false;
+                        }
+                    }
+                });
+            });
+            let sr = ctx.screen_rect();
+            let bot_y = ui.max_rect().bottom() + SPACE_SM;
+            ui.painter().line_segment(
+                [Pos2::new(sr.left(), bot_y), Pos2::new(sr.right(), bot_y)],
+                Stroke::new(1.0_f32, SUBTLE_BORDER),
+            );
+        });
+
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::none()
+                .fill(BG_NEAR_BLACK)
+                .inner_margin(Margin::same(SPACE_MD)),
+        )
+        .show(ctx, |ui| {
+            let Some(prof) = state.draft_profile.as_mut() else {
+                ui.label(RichText::new("Select a profile to edit.").color(TEXT_MUTED));
+                return;
+            };
+
+            let total_w = ui.available_width();
+            let total_h = ui.available_height();
+            let left_w = ((total_w - SPACE_MD) * 0.56).clamp(480.0, 560.0);
+            let right_w = (total_w - SPACE_MD - left_w).max(280.0);
+
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_MD;
+
+                // Left Column: Compact Settings + Full x360ce-style Controller Diagram + Selected Input Bar
+                egui::Frame::none()
+                    .fill(PANEL_SURFACE)
+                    .rounding(CARD_ROUNDING)
+                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .inner_margin(Margin::same(SPACE_MD))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                        ui.set_width(left_w - SPACE_MD * 2.0);
+                        ui.set_min_height((total_h - SPACE_MD * 2.0).max(400.0));
+                        ui.spacing_mut().item_spacing.y = SPACE_SM;
+
+                        egui::Grid::new("editor_compact_settings")
+                            .num_columns(2)
+                            .spacing([SPACE_MD, SPACE_XS + 2.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Profile Name:").small().color(TEXT_MUTED));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(egui::TextEdit::singleline(&mut prof.name).desired_width(210.0))
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                    ui.add_space(SPACE_SM);
+                                    ui.label(RichText::new("Layout:").small().color(TEXT_MUTED));
+                                    for (fam, lbl) in [
+                                        (ControllerFamily::Xbox, "Xbox"),
+                                        (ControllerFamily::Sony, "PS"),
+                                        (ControllerFamily::Nintendo, "Switch"),
+                                    ] {
+                                        if ui.selectable_label(prof.family == fam, lbl).clicked() {
+                                            prof.family = fam;
+                                            state.draft_dirty = true;
+                                        }
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label(RichText::new("Virtual Output:").small().color(TEXT_MUTED));
+                                ui.horizontal(|ui| {
+                                    for (kind, text) in [
+                                        (VirtualTargetKind::Xbox360, "Xbox 360"),
+                                        (VirtualTargetKind::DualShock4, "DualShock 4"),
+                                    ] {
+                                        let is_target = prof.target == kind;
+                                        let r = ui.radio_value(&mut prof.target, kind, text);
+                                        if is_target {
+                                            ui.painter().rect_stroke(
+                                                r.rect.expand(2.0),
+                                                Rounding::same(4.0),
+                                                Stroke::new(1.0_f32, NEON_VIOLET),
+                                            );
+                                        }
+                                        if r.changed() {
+                                            state.draft_dirty = true;
+                                        }
+                                    }
+                                    ui.separator();
+                                    if ui
+                                        .checkbox(&mut prof.cloak_physical, "Cloak")
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                    if ui
+                                        .checkbox(&mut prof.rumble_enabled, "Rumble")
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label(RichText::new("Options:").small().color(TEXT_MUTED));
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .checkbox(&mut prof.swap_ab_xy, "Swap A/B & X/Y")
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                    ui.separator();
+                                    if ui
+                                        .radio_value(
+                                            &mut prof.disconnect_policy,
+                                            DisconnectPolicy::KeepNeutral,
+                                            "Keep Neutral",
+                                        )
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                    if ui
+                                        .radio_value(
+                                            &mut prof.disconnect_policy,
+                                            DisconnectPolicy::DropVirtual,
+                                            "Drop",
+                                        )
+                                        .changed()
+                                    {
+                                        state.draft_dirty = true;
+                                    }
+                                });
+                                ui.end_row();
+
+                                ui.label(RichText::new("Stick Deadzone:").small().color(TEXT_MUTED));
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("L").small().color(TEXT_MUTED));
+                                    let mut l_pct = (prof.left_deadzone * 100.0).round();
+                                    if ui
+                                        .add(egui::Slider::new(&mut l_pct, 0.0..=50.0).suffix("%"))
+                                        .changed()
+                                    {
+                                        prof.left_deadzone = l_pct / 100.0;
+                                        state.draft_dirty = true;
+                                    }
+                                    ui.label(RichText::new("R").small().color(TEXT_MUTED));
+                                    let mut r_pct = (prof.right_deadzone * 100.0).round();
+                                    if ui
+                                        .add(egui::Slider::new(&mut r_pct, 0.0..=50.0).suffix("%"))
+                                        .changed()
+                                    {
+                                        prof.right_deadzone = r_pct / 100.0;
+                                        state.draft_dirty = true;
+                                    }
+                                });
+                                ui.end_row();
+                            });
+
+                        let phys_ref = live_ctrl.as_ref().map(|c| &c.physical_state);
+                        draw_controller_diagram(
+                            ui,
+                            prof.family,
+                            prof,
+                            phys_ref,
+                            &mut state.selected_diagram_button,
+                        );
+
+                        // Selected Input quick-remap bar synced directly with diagram click
+                        let sel_btn = state
+                            .selected_diagram_button
+                            .unwrap_or(LogicalButton::South);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            ui.label(
+                                RichText::new("Selected Input:")
+                                    .small()
+                                    .color(TEXT_MUTED),
+                            );
+                            ui.label(
+                                RichText::new(sel_btn.family_label(prof.family))
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.label(RichText::new("->").color(TEXT_MUTED));
+                            draw_remap_combobox(
+                                ui,
+                                prof,
+                                sel_btn,
+                                "selected_diagram_remap",
+                                180.0,
+                                &mut state.draft_dirty,
+                            );
+                        });
+                        });
+                    });
+
+                // Right Column: Synchronized Text Mapping List (exact same mapping data in text form)
+                egui::Frame::none()
+                    .fill(PANEL_SURFACE)
+                    .rounding(CARD_ROUNDING)
+                    .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
+                    .inner_margin(Margin::same(SPACE_MD))
+                    .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                        ui.set_width(right_w - SPACE_MD * 2.0);
+                        ui.set_min_height((total_h - SPACE_MD * 2.0).max(400.0));
+                        ui.spacing_mut().item_spacing.y = SPACE_SM;
+
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Input Mappings").strong().color(TEXT_PRIMARY),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("Reset All").clicked() {
+                                        prof.button_remap.clear();
+                                        state.draft_dirty = true;
+                                    }
+                                },
+                            );
+                        });
+
+                        let div = ui.min_rect();
+                        draw_aligned_divider(ui, div.left(), div.right());
+
+                        let present_mask = live_ctrl
+                            .as_ref()
+                            .map_or(0, |c| c.present_buttons_mask | c.physical_state.buttons_mask);
+                        let visible_buttons = visible_mapping_buttons(prof, present_mask);
+
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            let row_w = ui.available_width();
+                            for src in visible_buttons {
+                                let is_sel = state.selected_diagram_button == Some(src);
+                                let is_phys = live_ctrl.as_ref().is_some_and(|c| {
+                                    (c.physical_state.buttons_mask & src.bit()) != 0
+                                });
+                                let row_fill = if is_sel {
+                                    Color32::from_rgb(28, 23, 46)
+                                } else {
+                                    BG_NEAR_BLACK
+                                };
+                                let row_stroke = if is_phys {
+                                    Stroke::new(1.0_f32, NEON_PINK)
+                                } else if is_sel {
+                                    Stroke::new(1.0_f32, NEON_VIOLET)
+                                } else {
+                                    Stroke::new(1.0_f32, SUBTLE_BORDER)
+                                };
+
+                                egui::Frame::none()
+                                    .fill(row_fill)
+                                    .stroke(row_stroke)
+                                    .rounding(6.0)
+                                    .inner_margin(Margin::symmetric(SPACE_SM, SPACE_XS))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(
+                                            (row_w - SPACE_SM * 2.0 - 12.0).max(200.0),
+                                        );
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            let dot_col = if is_phys {
+                                                NEON_GREEN
+                                            } else if prof.button_remap.contains_key(&src) {
+                                                NEON_VIOLET
+                                            } else {
+                                                SUBTLE_BORDER
+                                            };
+                                            draw_status_dot(ui, dot_col);
+                                            let lbl_resp = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(src.family_label(prof.family))
+                                                        .small()
+                                                        .color(if is_sel || is_phys {
+                                                            TEXT_PRIMARY
+                                                        } else {
+                                                            TEXT_MUTED
+                                                        }),
+                                                )
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if lbl_resp.clicked() {
+                                                state.selected_diagram_button = Some(src);
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    draw_remap_combobox(
+                                                        ui,
+                                                        prof,
+                                                        src,
+                                                        ("text_remap", src),
+                                                        148.0,
+                                                        &mut state.draft_dirty,
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    });
+                                ui.add_space(SPACE_XS);
+                            }
+                        });
+                        });
+                    });
+            });
         });
 }
 
-fn draw_tab_button(ui: &mut egui::Ui, current: &mut MainTab, tab: MainTab, label: &str) {
-    let active = *current == tab;
-    let text = if active {
-        RichText::new(label).color(TEXT_PRIMARY).strong()
-    } else {
-        RichText::new(label).color(TEXT_MUTED)
+fn draw_remap_combobox(
+    ui: &mut egui::Ui,
+    prof: &mut Profile,
+    src: LogicalButton,
+    salt: impl std::hash::Hash,
+    width: f32,
+    dirty: &mut bool,
+) {
+    let current = prof.button_remap.get(&src).copied();
+    let label = match current {
+        None => "Default (Pass)".to_string(),
+        Some(None) => "Unbound".to_string(),
+        Some(Some(dst)) => dst.family_label(prof.family).to_string(),
     };
-    let fill = if active { WIDGET_SURFACE } else { Color32::TRANSPARENT };
-    let btn = egui::Button::new(text)
-        .fill(fill)
-        .stroke(Stroke::NONE)
-        .rounding(Rounding::same(6.0));
-    let resp = ui.add(btn);
-    if active {
-        let r = resp.rect;
-        ui.painter().line_segment(
-            [Pos2::new(r.left() + 6.0, r.bottom()), Pos2::new(r.right() - 6.0, r.bottom())],
-            Stroke::new(2.0_f32, NEON_VIOLET),
-        );
-    }
-    if resp.clicked() {
-        *current = tab;
-    }
+    egui::ComboBox::from_id_salt(salt)
+        .width(width)
+        .selected_text(RichText::new(label).small().color(TEXT_PRIMARY))
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(current.is_none(), "Default (Pass)")
+                .clicked()
+            {
+                prof.button_remap.remove(&src);
+                *dirty = true;
+            }
+            if ui
+                .selectable_label(current == Some(None), "Unbound")
+                .clicked()
+            {
+                prof.button_remap.insert(src, None);
+                *dirty = true;
+            }
+            for dst in LogicalButton::VIRTUAL_TARGETS {
+                if ui
+                    .selectable_label(
+                        current == Some(Some(dst)),
+                        dst.family_label(prof.family),
+                    )
+                    .clicked()
+                {
+                    prof.button_remap.insert(src, Some(dst));
+                    *dirty = true;
+                }
+            }
+        });
 }
 
 fn draw_status_bar(
@@ -430,6 +1089,7 @@ fn draw_status_bar(
     send: &mut impl FnMut(EngineCommand),
 ) {
     ui.horizontal_centered(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         let ds = &snap.driver_status;
         draw_status_dot(ui, if ds.vigem_installed { NEON_GREEN } else { NEON_PINK });
         ui.label(
@@ -461,16 +1121,13 @@ fn draw_status_bar(
         if ds.reboot_recommended {
             ui.separator();
             ui.label(
-                RichText::new("Reboot recommended to finish HidHide setup")
+                RichText::new("Reboot recommended")
                     .small()
                     .color(TEXT_MUTED),
             );
         } else if let Some(err) = &ds.hidhide_error {
             ui.separator();
             ui.label(RichText::new(err).small().color(TEXT_MUTED));
-        } else if let Some(msg) = &snap.last_status_message {
-            ui.separator();
-            ui.label(RichText::new(msg).small().color(TEXT_MUTED));
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -478,7 +1135,7 @@ fn draw_status_bar(
             let ws_mb = ws as f64 / (1024.0 * 1024.0);
             let priv_mb = priv_b as f64 / (1024.0 * 1024.0);
             ui.label(
-                RichText::new(format!("RAM: {ws_mb:.1} MB (Priv {priv_mb:.1} MB)"))
+                RichText::new(format!("RAM: {ws_mb:.1} / {priv_mb:.1} MB"))
                     .small()
                     .color(TEXT_MUTED),
             );
@@ -486,656 +1143,88 @@ fn draw_status_bar(
     });
 }
 
-fn draw_controller_list(
-    ui: &mut egui::Ui,
-    state: &mut AppUiState,
-    snap: &EngineSnapshot,
-    send: &mut impl FnMut(EngineCommand),
-) {
-    ui.horizontal(|ui| {
-        ui.heading(RichText::new("Controllers").color(TEXT_PRIMARY));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("Refresh").clicked() {
-                send(EngineCommand::RefreshStatus);
-            }
-        });
-    });
-    ui.add_space(4.0);
-    let sep_y = ui.cursor().top();
-    let avail = ui.available_rect_before_wrap();
-    ui.painter().line_segment(
-        [Pos2::new(avail.left(), sep_y), Pos2::new(avail.right(), sep_y)],
-        Stroke::new(1.0_f32, SUBTLE_BORDER),
-    );
-    ui.add_space(6.0);
-
-    if snap.controllers.is_empty() {
-        egui::Frame::none()
-            .fill(PANEL_SURFACE)
-            .rounding(CARD_ROUNDING)
-            .stroke(Stroke::new(1.0_f32, SUBTLE_BORDER))
-            .inner_margin(Margin::same(12.0))
-            .show(ui, |ui| {
-                ui.label(RichText::new("No physical controllers detected.").color(TEXT_PRIMARY));
-                ui.label(
-                    RichText::new("Connect a controller via Bluetooth or USB.")
-                        .small()
-                        .color(TEXT_MUTED),
-                );
-            });
-        return;
-    }
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        // Horizontal/vertical padding inside ScrollArea ensures active cards' 5px outer glow never clips.
-        egui::Frame::none()
-            .inner_margin(Margin::symmetric(6.0, 5.0))
-            .show(ui, |ui| {
-                for ctrl in &snap.controllers {
-                    let is_selected = state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
-                    let card_fill = if is_selected {
-                        Color32::from_rgb(24, 24, 38)
-                    } else {
-                        PANEL_SURFACE
-                    };
-                    let card_stroke = if ctrl.virtual_active {
-                        Stroke::NONE
-                    } else {
-                        Stroke::new(1.0_f32, if is_selected { NEON_VIOLET } else { SUBTLE_BORDER })
-                    };
-
-                    let card_resp = egui::Frame::none()
-                        .fill(card_fill)
-                        .rounding(CARD_ROUNDING)
-                        .inner_margin(Margin::same(10.0))
-                        .stroke(card_stroke)
-                        .show(ui, |ui| {
-                            let header_resp = ui.horizontal(|ui| {
-                                let status_dot = if ctrl.connected { NEON_GREEN } else { TEXT_MUTED };
-                                draw_status_dot(ui, status_dot);
-                                ui.label(RichText::new(&ctrl.name).strong().color(TEXT_PRIMARY));
-                            });
-                            if ui
-                                .interact(
-                                    header_resp.response.rect,
-                                    ui.id().with(&ctrl.canonical_id),
-                                    egui::Sense::click(),
-                                )
-                                .clicked()
-                            {
-                                state.selected_controller = Some(ctrl.canonical_id.clone());
-                                state.draft_dirty = false;
-                                state.editing_profile_id = Some(ctrl.profile_id.clone());
-                                state.draft_profile =
-                                    Some(snap.config.profile_by_id(&ctrl.profile_id).clone());
-                            }
-
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} | {} | {:04X}:{:04X}",
-                                        ctrl.family.label(),
-                                        ctrl.transport.label(),
-                                        ctrl.key.vid,
-                                        ctrl.key.pid
-                                    ))
-                                    .small()
-                                    .color(TEXT_MUTED),
-                                );
-                            });
-
-                            draw_battery_bar(ui, &ctrl.battery);
-
-                            ui.horizontal(|ui| {
-                                let mut enabled = ctrl.enabled;
-                                if ui.checkbox(&mut enabled, "Active").changed() {
-                                    send(EngineCommand::SetDeviceEnabled {
-                                        key: ctrl.key.clone(),
-                                        enabled,
-                                    });
-                                }
-                                if ctrl.virtual_active {
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(24, 20, 40))
-                                        .rounding(Rounding::same(4.0))
-                                        .stroke(Stroke::new(1.0_f32, NEON_VIOLET))
-                                        .inner_margin(Margin::symmetric(6.0, 2.0))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                RichText::new(format!("-> {}", ctrl.target_kind.label()))
-                                                    .small()
-                                                    .color(TEXT_PRIMARY),
-                                            );
-                                        });
-                                }
-                                let cloak_dot = if ctrl.cloaked { NEON_GREEN } else { TEXT_MUTED };
-                                draw_status_dot(ui, cloak_dot);
-                                ui.label(
-                                    RichText::new(if ctrl.cloaked { "Cloaked" } else { "Visible" })
-                                        .small()
-                                        .color(if ctrl.cloaked { TEXT_PRIMARY } else { TEXT_MUTED }),
-                                );
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Profile:").small().color(TEXT_MUTED));
-                                let mut chosen = ctrl.profile_id.clone();
-                                egui::ComboBox::from_id_salt(("ctrl_prof", &ctrl.canonical_id))
-                                    .width(190.0)
-                                    .selected_text(RichText::new(&ctrl.profile_name).color(TEXT_PRIMARY))
-                                    .show_ui(ui, |ui| {
-                                        for p in &snap.config.profiles {
-                                            if ui
-                                                .selectable_value(&mut chosen, p.id.clone(), &p.name)
-                                                .changed()
-                                            {
-                                                send(EngineCommand::SelectDeviceProfile {
-                                                    key: ctrl.key.clone(),
-                                                    profile_id: chosen.clone(),
-                                                });
-                                                state.draft_dirty = false;
-                                                state.editing_profile_id = Some(chosen.clone());
-                                                state.draft_profile = Some(p.clone());
-                                            }
-                                        }
-                                    });
-                            });
-
-                            draw_card_live_status(ui, &ctrl.physical_state);
-                        });
-
-                    if ctrl.virtual_active {
-                        paint_active_card_neon_edge_and_glow(
-                            ui.painter(),
-                            card_resp.response.rect,
-                            CARD_ROUNDING,
-                        );
-                    }
-
-                    ui.add_space(10.0);
-                }
-            });
-    });
-}
-
-fn draw_profile_editor(
-    ui: &mut egui::Ui,
-    state: &mut AppUiState,
-    snap: &EngineSnapshot,
-    send: &mut impl FnMut(EngineCommand),
-) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Editing Profile:").color(TEXT_MUTED));
-        let cur_id = state
-            .editing_profile_id
-            .clone()
-            .unwrap_or_else(|| snap.config.default_profile_id.clone());
-        let cur_name = state
-            .draft_profile
-            .as_ref()
-            .map(|p| p.name.as_str())
-            .unwrap_or("Select");
-        egui::ComboBox::from_id_salt("profile_selector")
-            .width(240.0)
-            .selected_text(RichText::new(cur_name).color(TEXT_PRIMARY))
-            .show_ui(ui, |ui| {
-                for p in &snap.config.profiles {
-                    if ui.selectable_label(p.id == cur_id, &p.name).clicked() {
-                        state.editing_profile_id = Some(p.id.clone());
-                        state.draft_profile = Some(p.clone());
-                        state.draft_dirty = false;
-                    }
-                }
-            });
-
-        if ui.button("+ New").clicked() {
-            let n = snap.config.profiles.len() + 1;
-            let mut new_prof = Profile::default_x360();
-            new_prof.id = format!("custom-{n}");
-            new_prof.name = format!("Custom Profile {n}");
-            state.editing_profile_id = Some(new_prof.id.clone());
-            state.draft_profile = Some(new_prof.clone());
-            state.draft_dirty = false;
-            send(EngineCommand::UpsertProfile(new_prof));
+fn extra_buttons_for_device(family: ControllerFamily, active_mask: u32) -> Vec<LogicalButton> {
+    let mut extras = Vec::new();
+    for btn in LogicalButton::EXTRA {
+        let exposed = (active_mask & btn.bit()) != 0;
+        let family_standard_extra = match (family, btn) {
+            (ControllerFamily::Nintendo, LogicalButton::Misc1) => true,
+            (ControllerFamily::Sony, LogicalButton::Misc1 | LogicalButton::Touchpad) => true,
+            (ControllerFamily::Xbox, LogicalButton::Misc1) => true,
+            _ => false,
+        };
+        if exposed || family_standard_extra {
+            extras.push(btn);
         }
-
-        if snap.config.profiles.len() > 1 {
-            if let Some(id) = &state.editing_profile_id {
-                if id != "x360-fifa" && id != "ds4-default" && ui.button("Delete").clicked() {
-                    send(EngineCommand::DeleteProfile(id.clone()));
-                    state.editing_profile_id = None;
-                    state.draft_profile = None;
-                    state.draft_dirty = false;
-                    return;
-                }
-            }
-        }
-    });
-
-    ui.add_space(6.0);
-    let sep_y = ui.cursor().top();
-    let avail = ui.available_rect_before_wrap();
-    ui.painter().line_segment(
-        [Pos2::new(avail.left(), sep_y), Pos2::new(avail.right(), sep_y)],
-        Stroke::new(1.0_f32, SUBTLE_BORDER),
-    );
-    ui.add_space(8.0);
-
-    let Some(prof) = state.draft_profile.as_mut() else {
-        ui.label(RichText::new("Select a profile to edit.").color(TEXT_MUTED));
-        return;
-    };
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        egui::Grid::new("profile_settings_grid")
-            .num_columns(2)
-            .spacing([16.0, 8.0])
-            .show(ui, |ui| {
-                ui.label(RichText::new("Profile Name:").color(TEXT_MUTED));
-                if ui.text_edit_singleline(&mut prof.name).changed() {
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Virtual Output Target:").color(TEXT_MUTED));
-                ui.horizontal(|ui| {
-                    for (kind, text) in [
-                        (VirtualTargetKind::Xbox360, "Xbox 360"),
-                        (VirtualTargetKind::DualShock4, "DualShock 4"),
-                    ] {
-                        let is_target = prof.target == kind;
-                        let r = ui.radio_value(&mut prof.target, kind, text);
-                        if is_target {
-                            ui.painter().rect_stroke(
-                                r.rect.expand(2.0),
-                                Rounding::same(4.0),
-                                Stroke::new(1.0_f32, NEON_VIOLET),
-                            );
-                        }
-                        if r.changed() {
-                            state.draft_dirty = true;
-                        }
-                    }
-                });
-                ui.end_row();
-
-                ui.label(RichText::new("HidHide Cloaking:").color(TEXT_MUTED));
-                if ui
-                    .checkbox(&mut prof.cloak_physical, "Hide physical controller from games")
-                    .changed()
-                {
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Disconnect Behaviour:").color(TEXT_MUTED));
-                ui.horizontal(|ui| {
-                    if ui
-                        .radio_value(
-                            &mut prof.disconnect_policy,
-                            DisconnectPolicy::KeepNeutral,
-                            "Keep virtual pad at neutral (default)",
-                        )
-                        .changed()
-                    {
-                        state.draft_dirty = true;
-                    }
-                    if ui
-                        .radio_value(
-                            &mut prof.disconnect_policy,
-                            DisconnectPolicy::DropVirtual,
-                            "Drop virtual pad",
-                        )
-                        .changed()
-                    {
-                        state.draft_dirty = true;
-                    }
-                });
-                ui.end_row();
-
-                ui.label(RichText::new("Force Feedback:").color(TEXT_MUTED));
-                if ui
-                    .checkbox(&mut prof.rumble_enabled, "Forward game rumble to physical pad")
-                    .changed()
-                {
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Face Layout:").color(TEXT_MUTED));
-                if ui
-                    .checkbox(&mut prof.swap_ab_xy, "Swap A/B & X/Y (Nintendo <-> Xbox)")
-                    .changed()
-                {
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Left Stick Deadzone:").color(TEXT_MUTED));
-                let mut l_pct = (prof.left_deadzone * 100.0).round();
-                if ui
-                    .add(egui::Slider::new(&mut l_pct, 0.0..=50.0).suffix("%"))
-                    .changed()
-                {
-                    prof.left_deadzone = l_pct / 100.0;
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-
-                ui.label(RichText::new("Right Stick Deadzone:").color(TEXT_MUTED));
-                let mut r_pct = (prof.right_deadzone * 100.0).round();
-                if ui
-                    .add(egui::Slider::new(&mut r_pct, 0.0..=50.0).suffix("%"))
-                    .changed()
-                {
-                    prof.right_deadzone = r_pct / 100.0;
-                    state.draft_dirty = true;
-                }
-                ui.end_row();
-            });
-
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Per-Button Remapping (Level 2)").strong().color(TEXT_PRIMARY));
-            if ui.small_button("Reset All Remaps").clicked() {
-                prof.button_remap.clear();
-                state.draft_dirty = true;
-            }
-        });
-        ui.label(
-            RichText::new("Override any logical SDL3 button to another virtual button or Unbound.")
-                .small()
-                .color(TEXT_MUTED),
-        );
-        ui.add_space(4.0);
-
-        egui::Grid::new("remap_grid")
-            .num_columns(3)
-            .spacing([12.0, 4.0])
-            .show(ui, |ui| {
-                for src in LogicalButton::ALL {
-                    ui.label(RichText::new(src.short_label()).color(TEXT_PRIMARY));
-                    let current = prof.button_remap.get(&src).copied();
-                    let label = match current {
-                        None => "Default (Pass)".to_string(),
-                        Some(None) => "Unbound".to_string(),
-                        Some(Some(dst)) => dst.short_label().to_string(),
-                    };
-                    egui::ComboBox::from_id_salt(("remap", src))
-                        .width(155.0)
-                        .selected_text(label)
-                        .show_ui(ui, |ui| {
-                            if ui.selectable_label(current.is_none(), "Default (Pass)").clicked() {
-                                prof.button_remap.remove(&src);
-                                state.draft_dirty = true;
-                            }
-                            if ui.selectable_label(current == Some(None), "Unbound").clicked() {
-                                prof.button_remap.insert(src, None);
-                                state.draft_dirty = true;
-                            }
-                            for dst in LogicalButton::ALL {
-                                if ui
-                                    .selectable_label(current == Some(Some(dst)), dst.short_label())
-                                    .clicked()
-                                {
-                                    prof.button_remap.insert(src, Some(dst));
-                                    state.draft_dirty = true;
-                                }
-                            }
-                        });
-                    ui.label("");
-                    ui.end_row();
-                }
-            });
-
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            let btn_text = if state.draft_dirty {
-                "Apply & Save Profile *"
-            } else {
-                "Apply & Save Profile"
-            };
-            let accent = if state.draft_dirty { NEON_PINK } else { NEON_VIOLET };
-            let save_btn = egui::Button::new(RichText::new(btn_text).strong().color(TEXT_PRIMARY))
-                .fill(Color32::from_rgb(27, 22, 42))
-                .stroke(Stroke::new(1.0_f32, accent))
-                .rounding(Rounding::same(6.0));
-            if ui.add(save_btn).clicked() {
-                send(EngineCommand::UpsertProfile(prof.clone()));
-                state.draft_dirty = false;
-            }
-        });
-    });
-}
-
-fn draw_live_test(ui: &mut egui::Ui, ctrl: Option<&ControllerSnapshot>) {
-    let Some(c) = ctrl else {
-        ui.label(
-            RichText::new("Select a connected controller from the sidebar to inspect live inputs.")
-                .color(TEXT_MUTED),
-        );
-        return;
-    };
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(&c.name).strong().color(TEXT_PRIMARY));
-        ui.separator();
-        ui.label(RichText::new(format!("Profile: {}", c.profile_name)).color(TEXT_MUTED));
-        ui.separator();
-        ui.label(RichText::new(format!("Output: {}", c.target_kind.label())).color(TEXT_PRIMARY));
-    });
-    ui.add_space(8.0);
-
-    let (vx_l, vy_l, vx_r, vy_r, vlt, vrt) = match c.virtual_output {
-        VirtualOutputSnapshot::Xbox360 {
-            thumb_lx,
-            thumb_ly,
-            thumb_rx,
-            thumb_ry,
-            left_trigger,
-            right_trigger,
-            ..
-        } => (
-            thumb_lx as f32 / 32767.0,
-            -(thumb_ly as f32 / 32767.0),
-            thumb_rx as f32 / 32767.0,
-            -(thumb_ry as f32 / 32767.0),
-            left_trigger as f32 / 255.0,
-            right_trigger as f32 / 255.0,
-        ),
-        VirtualOutputSnapshot::DualShock4 {
-            thumb_lx,
-            thumb_ly,
-            thumb_rx,
-            thumb_ry,
-            trigger_left,
-            trigger_right,
-            ..
-        } => (
-            (thumb_lx as f32 - 128.0) / 127.0,
-            (thumb_ly as f32 - 128.0) / 127.0,
-            (thumb_rx as f32 - 128.0) / 127.0,
-            (thumb_ry as f32 - 128.0) / 127.0,
-            trigger_left as f32 / 255.0,
-            trigger_right as f32 / 255.0,
-        ),
-        VirtualOutputSnapshot::None => (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
-    };
-
-    ui.horizontal(|ui| {
-        draw_stick_radar(
-            ui,
-            "Left Stick",
-            c.physical_state.left_x as f32 / 32767.0,
-            c.physical_state.left_y as f32 / 32767.0,
-            vx_l,
-            vy_l,
-        );
-        ui.add_space(18.0);
-        draw_stick_radar(
-            ui,
-            "Right Stick",
-            c.physical_state.right_x as f32 / 32767.0,
-            c.physical_state.right_y as f32 / 32767.0,
-            vx_r,
-            vy_r,
-        );
-        ui.add_space(18.0);
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Triggers").strong().color(TEXT_PRIMARY));
-            ui.add_space(6.0);
-            draw_trigger_bar(ui, &format!("L2 / LT ({:.0}%)", vlt * 100.0), vlt);
-            ui.add_space(8.0);
-            draw_trigger_bar(ui, &format!("R2 / RT ({:.0}%)", vrt * 100.0), vrt);
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!(
-                    "Physical SDL3 L: ({}, {}) R: ({}, {})",
-                    c.physical_state.left_x,
-                    c.physical_state.left_y,
-                    c.physical_state.right_x,
-                    c.physical_state.right_y
-                ))
-                .small()
-                .color(TEXT_MUTED),
-            );
-            ui.label(
-                RichText::new(format!("Virtual Output: {:?}", c.virtual_output))
-                    .small()
-                    .color(TEXT_MUTED),
-            );
-        });
-    });
-
-    ui.add_space(12.0);
-    ui.label(RichText::new("Buttons (Physical Pressed)").strong().color(TEXT_PRIMARY));
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        for btn in LogicalButton::ALL {
-            let down = (c.physical_state.buttons_mask & btn.bit()) != 0;
-            let (fill, stroke) = if down {
-                (Color32::from_rgb(30, 23, 48), Stroke::new(1.5_f32, NEON_VIOLET))
-            } else {
-                (BG_NEAR_BLACK, Stroke::new(1.0_f32, SUBTLE_BORDER))
-            };
-            let txt_col = if down { TEXT_PRIMARY } else { TEXT_MUTED };
-            egui::Frame::none()
-                .fill(fill)
-                .stroke(stroke)
-                .rounding(4.0)
-                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                .show(ui, |ui| {
-                    ui.label(RichText::new(btn.short_label()).color(txt_col));
-                });
-        }
-    });
-}
-
-fn draw_trigger_bar(ui: &mut egui::Ui, label: &str, value: f32) {
-    ui.label(RichText::new(label).color(TEXT_MUTED));
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(180.0, 10.0), egui::Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, Rounding::same(5.0), BG_NEAR_BLACK);
-    p.rect_stroke(rect, Rounding::same(5.0), Stroke::new(1.0_f32, SUBTLE_BORDER));
-    let frac = value.clamp(0.0, 1.0);
-    if frac > 0.0 {
-        let inner = rect.shrink(1.0);
-        let fill_w = (inner.width() * frac).max(4.0).min(inner.width());
-        p.rect_filled(
-            Rect::from_min_size(inner.min, Vec2::new(fill_w, inner.height())),
-            Rounding::same(4.0),
-            NEON_VIOLET,
-        );
     }
+    extras
 }
 
-fn draw_stick_radar(
-    ui: &mut egui::Ui,
-    title: &str,
-    phys_x: f32,
-    phys_y: f32,
-    virt_x: f32,
-    virt_y: f32,
-) {
-    ui.vertical(|ui| {
-        ui.label(RichText::new(title).strong().color(TEXT_PRIMARY));
-        let size = 140.0;
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::hover());
-        let p = ui.painter();
-        let center = rect.center();
-        let radius = size * 0.44;
-        p.rect_filled(rect, CARD_ROUNDING, BG_NEAR_BLACK);
-        p.rect_stroke(rect, CARD_ROUNDING, Stroke::new(1.0_f32, SUBTLE_BORDER));
-        p.circle_stroke(center, radius, Stroke::new(1.2_f32, SUBTLE_BORDER));
-        p.line_segment(
-            [Pos2::new(center.x - radius, center.y), Pos2::new(center.x + radius, center.y)],
-            Stroke::new(1.0_f32, SUBTLE_BORDER),
-        );
-        p.line_segment(
-            [Pos2::new(center.x, center.y - radius), Pos2::new(center.x, center.y + radius)],
-            Stroke::new(1.0_f32, SUBTLE_BORDER),
-        );
-
-        let phys_pt = Pos2::new(
-            center.x + phys_x.clamp(-1.0, 1.0) * radius,
-            center.y + phys_y.clamp(-1.0, 1.0) * radius,
-        );
-        p.circle_stroke(phys_pt, 5.0, Stroke::new(1.5_f32, NEON_PINK));
-
-        let virt_pt = Pos2::new(
-            center.x + virt_x.clamp(-1.0, 1.0) * radius,
-            center.y + virt_y.clamp(-1.0, 1.0) * radius,
-        );
-        p.circle_filled(virt_pt, 5.0, NEON_GREEN);
-    });
-}
-
-#[inline]
-pub fn normalize_stick_axis(raw: i16) -> f32 {
-    (raw as f32 / 32767.0).clamp(-1.0, 1.0)
-}
-
-#[inline]
-pub fn normalize_trigger_axis(raw: i16) -> f32 {
-    if raw <= 0 {
-        0.0
-    } else {
-        (raw as f32 / 32767.0).clamp(0.0, 1.0)
+fn visible_mapping_buttons(profile: &Profile, active_mask: u32) -> Vec<LogicalButton> {
+    let mut out = Vec::with_capacity(26);
+    out.extend_from_slice(&LogicalButton::STANDARD);
+    for btn in LogicalButton::EXTRA {
+        let exposed = (active_mask & btn.bit()) != 0;
+        let remapped = profile.button_remap.contains_key(&btn);
+        let family_default = match (profile.family, btn) {
+            (ControllerFamily::Nintendo, LogicalButton::Misc1) => true,
+            (ControllerFamily::Sony, LogicalButton::Misc1 | LogicalButton::Touchpad) => true,
+            (ControllerFamily::Xbox, LogicalButton::Misc1) => true,
+            _ => matches!(
+                btn,
+                LogicalButton::RightPaddle1
+                    | LogicalButton::LeftPaddle1
+                    | LogicalButton::RightPaddle2
+                    | LogicalButton::LeftPaddle2
+            ),
+        };
+        if exposed || remapped || family_default {
+            out.push(btn);
+        }
     }
+    out
 }
 
-const CARD_MINI_BUTTONS_ROW1: [(LogicalButton, &str); 8] = [
-    (LogicalButton::South, "A"),
-    (LogicalButton::East, "B"),
-    (LogicalButton::West, "X"),
-    (LogicalButton::North, "Y"),
-    (LogicalButton::LeftShoulder, "LB"),
-    (LogicalButton::RightShoulder, "RB"),
-    (LogicalButton::LeftStick, "L3"),
-    (LogicalButton::RightStick, "R3"),
+const CARD_STANDARD_ROW1: [LogicalButton; 8] = [
+    LogicalButton::South,
+    LogicalButton::East,
+    LogicalButton::West,
+    LogicalButton::North,
+    LogicalButton::LeftShoulder,
+    LogicalButton::RightShoulder,
+    LogicalButton::LeftStick,
+    LogicalButton::RightStick,
 ];
 
-const CARD_MINI_BUTTONS_ROW2: [(LogicalButton, &str); 7] = [
-    (LogicalButton::DpadUp, "Up"),
-    (LogicalButton::DpadDown, "Dn"),
-    (LogicalButton::DpadLeft, "Lt"),
-    (LogicalButton::DpadRight, "Rt"),
-    (LogicalButton::Back, "Bk"),
-    (LogicalButton::Start, "St"),
-    (LogicalButton::Guide, "Gd"),
+const CARD_STANDARD_ROW2: [LogicalButton; 7] = [
+    LogicalButton::DpadUp,
+    LogicalButton::DpadDown,
+    LogicalButton::DpadLeft,
+    LogicalButton::DpadRight,
+    LogicalButton::Back,
+    LogicalButton::Start,
+    LogicalButton::Guide,
 ];
 
-fn draw_card_live_status(ui: &mut egui::Ui, phys: &PhysicalSnapshot) {
-    ui.add_space(4.0);
-    let sep_y = ui.cursor().top();
-    let bounds = ui.min_rect();
-    ui.painter().line_segment(
-        [Pos2::new(bounds.left(), sep_y), Pos2::new(bounds.right(), sep_y)],
-        Stroke::new(1.0_f32, SUBTLE_BORDER),
-    );
-    ui.add_space(6.0);
+fn draw_card_live_status(
+    ui: &mut egui::Ui,
+    family: ControllerFamily,
+    present_mask: u32,
+    phys: &PhysicalSnapshot,
+    card_inner_w: f32,
+) {
+    ui.add_space(SPACE_XS);
+    let div_left = ui.cursor().left();
+    draw_aligned_divider(ui, div_left, div_left + card_inner_w);
+
+    let (lt_lbl, rt_lbl) = match family {
+        ControllerFamily::Sony => ("L2", "R2"),
+        ControllerFamily::Nintendo => ("ZL", "ZR"),
+        ControllerFamily::Xbox | ControllerFamily::Generic => ("LT", "RT"),
+    };
 
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
         draw_mini_stick_pad(
             ui,
             "L",
@@ -1149,29 +1238,39 @@ fn draw_card_live_status(ui: &mut egui::Ui, phys: &PhysicalSnapshot) {
             normalize_stick_axis(phys.right_y),
         );
         ui.vertical(|ui| {
-            ui.add_space(3.0);
-            draw_mini_trigger_row(ui, "LT", normalize_trigger_axis(phys.left_trigger));
-            ui.add_space(4.0);
-            draw_mini_trigger_row(ui, "RT", normalize_trigger_axis(phys.right_trigger));
+            ui.add_space(SPACE_XS);
+            draw_mini_trigger_row(ui, lt_lbl, normalize_trigger_axis(phys.left_trigger));
+            ui.add_space(SPACE_XS);
+            draw_mini_trigger_row(ui, rt_lbl, normalize_trigger_axis(phys.right_trigger));
         });
     });
 
-    ui.add_space(5.0);
+    ui.add_space(SPACE_XS);
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.5;
-        for (btn, label) in CARD_MINI_BUTTONS_ROW1 {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        for btn in CARD_STANDARD_ROW1 {
             let pressed = (phys.buttons_mask & btn.bit()) != 0;
-            draw_mini_button_pill(ui, label, pressed);
+            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0);
         }
     });
-    ui.add_space(3.5);
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.5;
-        for (btn, label) in CARD_MINI_BUTTONS_ROW2 {
+        ui.spacing_mut().item_spacing.x = SPACE_XS;
+        for btn in CARD_STANDARD_ROW2 {
             let pressed = (phys.buttons_mask & btn.bit()) != 0;
-            draw_mini_button_pill(ui, label, pressed);
+            draw_mini_button_pill(ui, btn.family_chip(family), pressed, 32.0);
         }
     });
+
+    let extras = extra_buttons_for_device(family, present_mask | phys.buttons_mask);
+    if !extras.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::splat(SPACE_XS);
+            for btn in extras {
+                let pressed = (phys.buttons_mask & btn.bit()) != 0;
+                draw_mini_button_pill(ui, btn.family_chip(family), pressed, 36.0);
+            }
+        });
+    }
 }
 
 fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
@@ -1184,11 +1283,17 @@ fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
     p.circle_filled(center, radius, BG_NEAR_BLACK);
     p.circle_stroke(center, radius, Stroke::new(1.0_f32, SUBTLE_BORDER));
     p.line_segment(
-        [Pos2::new(center.x - radius + 2.0, center.y), Pos2::new(center.x + radius - 2.0, center.y)],
+        [
+            Pos2::new(center.x - radius + 2.0, center.y),
+            Pos2::new(center.x + radius - 2.0, center.y),
+        ],
         Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
     );
     p.line_segment(
-        [Pos2::new(center.x, center.y - radius + 2.0), Pos2::new(center.x, center.y + radius - 2.0)],
+        [
+            Pos2::new(center.x, center.y - radius + 2.0),
+            Pos2::new(center.x, center.y + radius - 2.0),
+        ],
         Stroke::new(1.0_f32, Color32::from_rgb(28, 28, 44)),
     );
     p.text(
@@ -1220,13 +1325,13 @@ fn draw_mini_stick_pad(ui: &mut egui::Ui, tag: &str, x: f32, y: f32) {
 
 fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
+        ui.spacing_mut().item_spacing.x = SPACE_XS + 2.0;
         ui.label(
             RichText::new(label)
                 .font(FontId::new(10.5, FontFamily::Proportional))
                 .color(TEXT_MUTED),
         );
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(82.0, 7.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(112.0, 7.0), egui::Sense::hover());
         let p = ui.painter();
         p.rect_filled(rect, Rounding::same(3.5), BG_NEAR_BLACK);
         p.rect_stroke(rect, Rounding::same(3.5), Stroke::new(1.0_f32, SUBTLE_BORDER));
@@ -1248,8 +1353,8 @@ fn draw_mini_trigger_row(ui: &mut egui::Ui, label: &str, frac: f32) {
     });
 }
 
-fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(26.5, 17.0), egui::Sense::hover());
+fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 18.0), egui::Sense::hover());
     let p = ui.painter();
     if pressed {
         p.rect_stroke(
@@ -1278,57 +1383,14 @@ fn draw_mini_button_pill(ui: &mut egui::Ui, label: &str, pressed: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::ControllerSnapshot;
     use z_core::backend::DriverStatus;
     use z_core::battery::BatteryReading;
     use z_core::model::{ControllerFamily, HardwareKey, Transport, VirtualTargetKind};
     use z_core::profile::AppConfig;
 
-    #[test]
-    fn battery_bar_uses_pink_at_or_below_twenty_and_green_above() {
-        assert_eq!(battery_bar_color(Some(0)), NEON_PINK);
-        assert_eq!(battery_bar_color(Some(20)), NEON_PINK);
-        assert_eq!(battery_bar_color(Some(21)), NEON_GREEN);
-        assert_eq!(battery_bar_color(Some(100)), NEON_GREEN);
-        assert_eq!(battery_bar_color(None), NEON_GREEN);
-    }
-
-    #[test]
-    fn gradient_lerp_endpoints_match_violet_to_pink() {
-        assert_eq!(lerp_color(NEON_VIOLET, NEON_PINK, 0.0), NEON_VIOLET);
-        assert_eq!(lerp_color(NEON_VIOLET, NEON_PINK, 1.0), NEON_PINK);
-        let mid = lerp_color(NEON_VIOLET, NEON_PINK, 0.5);
-        assert_eq!(mid, Color32::from_rgb(212, 102, 212));
-    }
-
-    #[test]
-    fn card_live_status_covers_all_buttons_and_axis_normalization() {
-        let mut seen = Vec::new();
-        for (btn, _) in CARD_MINI_BUTTONS_ROW1
-            .iter()
-            .chain(CARD_MINI_BUTTONS_ROW2.iter())
-        {
-            if !seen.contains(btn) {
-                seen.push(*btn);
-            }
-        }
-        assert_eq!(seen.len(), LogicalButton::ALL.len());
-        for b in LogicalButton::ALL {
-            assert!(seen.contains(&b), "missing button {b:?} from card live status view");
-        }
-
-        assert_eq!(normalize_stick_axis(0), 0.0);
-        assert_eq!(normalize_stick_axis(i16::MAX), 1.0);
-        assert_eq!(normalize_stick_axis(i16::MIN), -1.0);
-        assert_eq!(normalize_trigger_axis(0), 0.0);
-        assert_eq!(normalize_trigger_axis(-500), 0.0);
-        assert_eq!(normalize_trigger_axis(i16::MAX), 1.0);
-    }
-
-    #[test]
-    fn restyled_ui_renders_both_tabs_with_active_glow_and_subtle_cards() {
-        let ctx = egui::Context::default();
-        configure_neon_theme_and_fonts(&ctx);
-        let snap = EngineSnapshot {
+    fn sample_snapshot() -> EngineSnapshot {
+        EngineSnapshot {
             controllers: vec![
                 ControllerSnapshot {
                     key: HardwareKey::new(0x057E, 0x2009, "NSP-1"),
@@ -1339,8 +1401,8 @@ mod tests {
                     transport: Transport::Bluetooth,
                     connected: true,
                     enabled: true,
-                    profile_id: "x360-fifa".to_string(),
-                    profile_name: "Xbox 360 Default (FIFA)".to_string(),
+                    profile_id: "xbox-360".to_string(),
+                    profile_name: "Xbox 360".to_string(),
                     target_kind: VirtualTargetKind::Xbox360,
                     cloaked: true,
                     virtual_active: true,
@@ -1350,8 +1412,10 @@ mod tests {
                         status: BatteryStatus::OnBattery,
                         source: "sdl3",
                     },
+                    present_buttons_mask: LogicalButton::Misc1.bit()
+                        | LogicalButton::RightPaddle1.bit(),
                     physical_state: PhysicalSnapshot {
-                        buttons_mask: LogicalButton::South.bit() | LogicalButton::RightShoulder.bit(),
+                        buttons_mask: LogicalButton::South.bit() | LogicalButton::Misc1.bit(),
                         left_x: 24000,
                         left_y: -21000,
                         right_x: 0,
@@ -1359,7 +1423,7 @@ mod tests {
                         left_trigger: 0,
                         right_trigger: 22384,
                     },
-                    virtual_output: VirtualOutputSnapshot::None,
+                    virtual_output: crate::engine::VirtualOutputSnapshot::None,
                     instance_id: None,
                 },
                 ControllerSnapshot {
@@ -1371,8 +1435,8 @@ mod tests {
                     transport: Transport::Usb,
                     connected: true,
                     enabled: false,
-                    profile_id: "ds4-default".to_string(),
-                    profile_name: "DualShock 4 Default".to_string(),
+                    profile_id: "dualsense".to_string(),
+                    profile_name: "DualSense".to_string(),
                     target_kind: VirtualTargetKind::DualShock4,
                     cloaked: false,
                     virtual_active: false,
@@ -1382,8 +1446,9 @@ mod tests {
                         status: BatteryStatus::OnBattery,
                         source: "sony-hid",
                     },
+                    present_buttons_mask: LogicalButton::Touchpad.bit() | LogicalButton::Misc1.bit(),
                     physical_state: PhysicalSnapshot::default(),
-                    virtual_output: VirtualOutputSnapshot::None,
+                    virtual_output: crate::engine::VirtualOutputSnapshot::None,
                     instance_id: None,
                 },
             ],
@@ -1396,20 +1461,175 @@ mod tests {
                 reboot_recommended: false,
             },
             last_status_message: None,
-        };
+        }
+    }
 
+    #[test]
+    fn battery_bar_uses_pink_at_or_below_twenty_and_green_above() {
+        assert_eq!(battery_bar_color(Some(0)), NEON_PINK);
+        assert_eq!(battery_bar_color(Some(20)), NEON_PINK);
+        assert_eq!(battery_bar_color(Some(21)), NEON_GREEN);
+        assert_eq!(battery_bar_color(Some(100)), NEON_GREEN);
+        assert_eq!(battery_bar_color(None), NEON_GREEN);
+    }
+
+    #[test]
+    fn card_live_status_covers_all_standard_and_extra_buttons() {
+        let mut seen: Vec<LogicalButton> = CARD_STANDARD_ROW1
+            .into_iter()
+            .chain(CARD_STANDARD_ROW2)
+            .collect();
+        seen.extend_from_slice(&LogicalButton::EXTRA);
+        assert_eq!(seen.len(), LogicalButton::ALL.len());
+        for b in LogicalButton::ALL {
+            assert!(seen.contains(&b));
+        }
+
+        let nintendo_extras = extra_buttons_for_device(ControllerFamily::Nintendo, 0);
+        assert!(nintendo_extras.contains(&LogicalButton::Misc1));
+        let sony_extras = extra_buttons_for_device(ControllerFamily::Sony, 0);
+        assert!(sony_extras.contains(&LogicalButton::Touchpad));
+        assert!(sony_extras.contains(&LogicalButton::Misc1));
+        let xbox_extras =
+            extra_buttons_for_device(ControllerFamily::Xbox, LogicalButton::RightPaddle1.bit());
+        assert!(xbox_extras.contains(&LogicalButton::Misc1));
+        assert!(xbox_extras.contains(&LogicalButton::RightPaddle1));
+    }
+
+    #[test]
+    fn compact_main_and_profile_editor_render_all_families_cleanly() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let snap = sample_snapshot();
         let mut ui_state = AppUiState::default();
-        for tab in [MainTab::ProfileEditor, MainTab::LiveTest] {
-            ui_state.active_tab = tab;
-            let raw = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(960.0, 640.0))),
+
+        let compact_raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(392.0, 580.0))),
+            ..Default::default()
+        };
+        let compact_out = ctx.run(compact_raw, |c| {
+            let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+        });
+        assert!(!ctx.tessellate(compact_out.shapes, 1.0).is_empty());
+
+        for pid in ["xbox-360", "dualsense", "switch-pro"] {
+            ui_state.editing_profile_id = Some(pid.to_string());
+            ui_state.draft_profile = Some(snap.config.profile_by_id(pid).clone());
+            let ed_raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(980.0, 660.0))),
                 ..Default::default()
             };
-            let out = ctx.run(raw, |c| {
-                draw_app_ui_snapshot(c, &mut ui_state, &snap, |_| {});
+            let ed_out = ctx.run(ed_raw, |c| {
+                draw_profile_editor_snapshot(c, &mut ui_state, &snap, |_| {});
             });
-            let primitives = ctx.tessellate(out.shapes, 1.0);
-            assert!(!primitives.is_empty(), "expected tessellated shapes for {tab:?}");
+            assert!(!ctx.tessellate(ed_out.shapes, 1.0).is_empty());
         }
+    }
+
+    fn find_text_center(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<Pos2> {
+        fn scan(s: &egui::Shape, needle: &str) -> Option<Pos2> {
+            match s {
+                egui::Shape::Vec(v) => v.iter().rev().find_map(|c| scan(c, needle)),
+                egui::Shape::Text(ts) if ts.galley.text() == needle => {
+                    Some(ts.pos + ts.galley.size() * 0.5)
+                }
+                _ => None,
+            }
+        }
+        shapes.iter().rev().find_map(|c| scan(&c.shape, needle))
+    }
+
+    #[test]
+    fn clicking_profile_selector_emits_select_device_profile_command() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let snap = sample_snapshot();
+        let mut ui_state = AppUiState::default();
+        let mut emitted = Vec::new();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0)));
+        let mut t = 0.0_f64;
+
+        let mut step = |events: Vec<egui::Event>, emitted: &mut Vec<EngineCommand>| {
+            t += 0.05;
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(t),
+                    events,
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd);
+                    });
+                },
+            )
+            .shapes
+        };
+
+        // 1. Render compact window and locate card 1's ComboBox ("Xbox 360") in painted shapes.
+        let shapes_idle = step(vec![], &mut emitted);
+        let combo_pos = find_text_center(&shapes_idle, "Xbox 360")
+            .expect("expected 'Xbox 360' ComboBox text in compact view");
+
+        // 2. Real pointer press + release on ComboBox button opens popup.
+        let _ = step(
+            vec![
+                egui::Event::PointerMoved(combo_pos),
+                egui::Event::PointerButton {
+                    pos: combo_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut emitted,
+        );
+        let shapes_open = step(
+            vec![egui::Event::PointerButton {
+                pos: combo_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut emitted,
+        );
+        let shapes_popup = step(vec![], &mut emitted);
+
+        // 3. Locate "DualSense" option inside topmost popup layer and click it.
+        let item_pos = find_text_center(&shapes_popup, "DualSense")
+            .or_else(|| find_text_center(&shapes_open, "DualSense"))
+            .expect("expected 'DualSense' item inside opened ComboBox popup");
+
+        let _ = step(
+            vec![
+                egui::Event::PointerMoved(item_pos),
+                egui::Event::PointerButton {
+                    pos: item_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            &mut emitted,
+        );
+        let _ = step(
+            vec![egui::Event::PointerButton {
+                pos: item_pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            &mut emitted,
+        );
+
+        assert!(
+            emitted.iter().any(|c| matches!(
+                c,
+                EngineCommand::SelectDeviceProfile { profile_id, .. } if profile_id == "dualsense"
+            )),
+            "expected SelectDeviceProfile {{ profile_id: \"dualsense\" }} from ComboBox click, got {emitted:?}"
+        );
     }
 }

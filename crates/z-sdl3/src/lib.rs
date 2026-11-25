@@ -161,9 +161,43 @@ pub enum SdlGamepadButton {
     RightPaddle2 = 18,
     LeftPaddle2 = 19,
     Touchpad = 20,
+    Misc2 = 21,
+    Misc3 = 22,
+    Misc4 = 23,
+    Misc5 = 24,
+    Misc6 = 25,
 }
 
 impl SdlGamepadButton {
+    pub const ALL: [SdlGamepadButton; 26] = [
+        Self::South,
+        Self::East,
+        Self::West,
+        Self::North,
+        Self::Back,
+        Self::Guide,
+        Self::Start,
+        Self::LeftStick,
+        Self::RightStick,
+        Self::LeftShoulder,
+        Self::RightShoulder,
+        Self::DpadUp,
+        Self::DpadDown,
+        Self::DpadLeft,
+        Self::DpadRight,
+        Self::Misc1,
+        Self::RightPaddle1,
+        Self::LeftPaddle1,
+        Self::RightPaddle2,
+        Self::LeftPaddle2,
+        Self::Touchpad,
+        Self::Misc2,
+        Self::Misc3,
+        Self::Misc4,
+        Self::Misc5,
+        Self::Misc6,
+    ];
+
     pub fn from_raw(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::South),
@@ -187,6 +221,11 @@ impl SdlGamepadButton {
             18 => Some(Self::RightPaddle2),
             19 => Some(Self::LeftPaddle2),
             20 => Some(Self::Touchpad),
+            21 => Some(Self::Misc2),
+            22 => Some(Self::Misc3),
+            23 => Some(Self::Misc4),
+            24 => Some(Self::Misc5),
+            25 => Some(Self::Misc6),
             _ => None,
         }
     }
@@ -382,6 +421,7 @@ struct SdlApi {
     sdl_get_gamepad_power_info: unsafe extern "C" fn(*mut SdlGamepadOpaque, *mut c_int) -> i32,
     sdl_get_gamepad_player_index: unsafe extern "C" fn(*mut SdlGamepadOpaque) -> c_int,
     sdl_is_joystick_virtual: unsafe extern "C" fn(SdlJoystickId) -> bool,
+    sdl_gamepad_has_button: unsafe extern "C" fn(*mut SdlGamepadOpaque, i32) -> bool,
     sdl_get_gamepad_axis: unsafe extern "C" fn(*mut SdlGamepadOpaque, i32) -> i16,
     sdl_get_gamepad_button: unsafe extern "C" fn(*mut SdlGamepadOpaque, i32) -> bool,
     sdl_rumble_gamepad: unsafe extern "C" fn(*mut SdlGamepadOpaque, u16, u16, u32) -> bool,
@@ -500,6 +540,7 @@ fn load_sdl_api() -> Result<&'static SdlApi, SdlError> {
                         "SDL_GetGamepadPlayerIndex",
                     )?,
                     sdl_is_joystick_virtual: resolve_sym(module, "SDL_IsJoystickVirtual")?,
+                    sdl_gamepad_has_button: resolve_sym(module, "SDL_GamepadHasButton")?,
                     sdl_get_gamepad_axis: resolve_sym(module, "SDL_GetGamepadAxis")?,
                     sdl_get_gamepad_button: resolve_sym(module, "SDL_GetGamepadButton")?,
                     sdl_rumble_gamepad: resolve_sym(module, "SDL_RumbleGamepad")?,
@@ -853,6 +894,10 @@ impl SdlGamepad {
         unsafe { (self.api.sdl_get_gamepad_button)(self.ptr, button as i32) }
     }
 
+    pub fn has_button(&self, button: SdlGamepadButton) -> bool {
+        unsafe { (self.api.sdl_gamepad_has_button)(self.ptr, button as i32) }
+    }
+
     pub fn rumble(&self, low_freq: u16, high_freq: u16, duration_ms: u32) -> bool {
         unsafe { (self.api.sdl_rumble_gamepad)(self.ptr, low_freq, high_freq, duration_ms) }
     }
@@ -891,8 +936,8 @@ impl SdlVirtualGamepad {
         desc.vendor_id = vid;
         desc.product_id = pid;
         desc.naxes = 6;
-        desc.nbuttons = 15;
-        desc.button_mask = 0x7FFF;
+        desc.nbuttons = 21;
+        desc.button_mask = 0x001F_FFFF;
         desc.axis_mask = 0x3F;
         desc.name = c_name.as_ptr();
 

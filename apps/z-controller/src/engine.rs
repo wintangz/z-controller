@@ -47,6 +47,7 @@ pub struct ControllerSnapshot {
     pub virtual_active: bool,
     pub virtual_serial: Option<u32>,
     pub battery: BatteryReading,
+    pub present_buttons_mask: u32,
     pub physical_state: PhysicalSnapshot,
     pub virtual_output: VirtualOutputSnapshot,
     pub instance_id: Option<String>,
@@ -135,6 +136,7 @@ pub struct EngineSnapshot {
     pub last_status_message: Option<String>,
 }
 
+#[derive(Debug)]
 pub enum EngineCommand {
     SelectDeviceProfile {
         key: HardwareKey,
@@ -157,6 +159,8 @@ pub struct EngineHandle {
     snapshot: Arc<Mutex<Arc<EngineSnapshot>>>,
     window_visible: Arc<AtomicBool>,
     ui_hwnd: Arc<Mutex<usize>>,
+    editor_visible: Arc<AtomicBool>,
+    editor_hwnd: Arc<Mutex<usize>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -168,10 +172,14 @@ impl EngineHandle {
         let snapshot = Arc::new(Mutex::new(Arc::new(EngineSnapshot::default())));
         let window_visible = Arc::new(AtomicBool::new(false));
         let ui_hwnd = Arc::new(Mutex::new(0usize));
+        let editor_visible = Arc::new(AtomicBool::new(false));
+        let editor_hwnd = Arc::new(Mutex::new(0usize));
 
         let snap_clone = Arc::clone(&snapshot);
         let vis_clone = Arc::clone(&window_visible);
         let hwnd_clone = Arc::clone(&ui_hwnd);
+        let ed_vis_clone = Arc::clone(&editor_visible);
+        let ed_hwnd_clone = Arc::clone(&editor_hwnd);
         let waker_clone = waker.clone();
 
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -186,6 +194,8 @@ impl EngineHandle {
                     snap_clone,
                     vis_clone,
                     hwnd_clone,
+                    ed_vis_clone,
+                    ed_hwnd_clone,
                     ready_tx,
                 );
             })
@@ -199,6 +209,8 @@ impl EngineHandle {
             snapshot,
             window_visible,
             ui_hwnd,
+            editor_visible,
+            editor_hwnd,
             join: Some(join),
         })
     }
@@ -209,6 +221,14 @@ impl EngineHandle {
 
     pub fn set_window_visible(&self, visible: bool) {
         self.window_visible.store(visible, Ordering::Release);
+    }
+
+    pub fn set_editor_hwnd(&self, hwnd: HWND) {
+        *self.editor_hwnd.lock().unwrap_or_else(|e| e.into_inner()) = hwnd as usize;
+    }
+
+    pub fn set_editor_visible(&self, visible: bool) {
+        self.editor_visible.store(visible, Ordering::Release);
     }
 
     pub fn snapshot(&self) -> Arc<EngineSnapshot> {
@@ -246,6 +266,7 @@ struct OpenPad {
     family: ControllerFamily,
     transport: Transport,
     instance_id: Option<String>,
+    present_buttons_mask: u32,
     state: PhysicalGamepadState,
     battery: BatteryReading,
     opened_at: Instant,
@@ -268,8 +289,30 @@ fn map_sdl_button(btn: SdlGamepadButton) -> Option<LogicalButton> {
         SdlGamepadButton::DpadDown => Some(LogicalButton::DpadDown),
         SdlGamepadButton::DpadLeft => Some(LogicalButton::DpadLeft),
         SdlGamepadButton::DpadRight => Some(LogicalButton::DpadRight),
-        _ => None,
+        SdlGamepadButton::Misc1 => Some(LogicalButton::Misc1),
+        SdlGamepadButton::RightPaddle1 => Some(LogicalButton::RightPaddle1),
+        SdlGamepadButton::LeftPaddle1 => Some(LogicalButton::LeftPaddle1),
+        SdlGamepadButton::RightPaddle2 => Some(LogicalButton::RightPaddle2),
+        SdlGamepadButton::LeftPaddle2 => Some(LogicalButton::LeftPaddle2),
+        SdlGamepadButton::Touchpad => Some(LogicalButton::Touchpad),
+        SdlGamepadButton::Misc2 => Some(LogicalButton::Misc2),
+        SdlGamepadButton::Misc3 => Some(LogicalButton::Misc3),
+        SdlGamepadButton::Misc4 => Some(LogicalButton::Misc4),
+        SdlGamepadButton::Misc5 => Some(LogicalButton::Misc5),
+        SdlGamepadButton::Misc6 => Some(LogicalButton::Misc6),
     }
+}
+
+fn detect_present_buttons_mask(gp: &SdlGamepad) -> u32 {
+    let mut mask = 0u32;
+    for btn in SdlGamepadButton::ALL {
+        if gp.has_button(btn) {
+            if let Some(lb) = map_sdl_button(btn) {
+                mask |= lb.bit();
+            }
+        }
+    }
+    mask
 }
 
 fn read_sdl_battery(gp: &SdlGamepad, family: ControllerFamily, path: Option<&str>) -> BatteryReading {
@@ -375,23 +418,7 @@ fn snapshot_physical_state(gp: &SdlGamepad) -> PhysicalGamepadState {
         left_trigger: gp.axis(SdlGamepadAxis::LeftTrigger),
         right_trigger: gp.axis(SdlGamepadAxis::RightTrigger),
     };
-    for btn in [
-        SdlGamepadButton::South,
-        SdlGamepadButton::East,
-        SdlGamepadButton::West,
-        SdlGamepadButton::North,
-        SdlGamepadButton::LeftShoulder,
-        SdlGamepadButton::RightShoulder,
-        SdlGamepadButton::Back,
-        SdlGamepadButton::Start,
-        SdlGamepadButton::Guide,
-        SdlGamepadButton::LeftStick,
-        SdlGamepadButton::RightStick,
-        SdlGamepadButton::DpadUp,
-        SdlGamepadButton::DpadDown,
-        SdlGamepadButton::DpadLeft,
-        SdlGamepadButton::DpadRight,
-    ] {
+    for btn in SdlGamepadButton::ALL {
         if let Some(lb) = map_sdl_button(btn) {
             state.set_button(lb, gp.button(btn));
         }
@@ -408,6 +435,8 @@ fn run_engine_loop(
     snapshot_out: Arc<Mutex<Arc<EngineSnapshot>>>,
     window_visible: Arc<AtomicBool>,
     ui_hwnd: Arc<Mutex<usize>>,
+    editor_visible: Arc<AtomicBool>,
+    editor_hwnd: Arc<Mutex<usize>>,
     ready_tx: Sender<()>,
 ) {
     let mut config = AppConfig::load_or_default(&config_path);
@@ -473,6 +502,8 @@ fn run_engine_loop(
         &snapshot_out,
         &window_visible,
         &ui_hwnd,
+        &editor_visible,
+        &editor_hwnd,
     );
     let _ = ready_tx.send(());
 
@@ -592,6 +623,8 @@ fn run_engine_loop(
                 &snapshot_out,
                 &window_visible,
                 &ui_hwnd,
+                &editor_visible,
+                &editor_hwnd,
             );
         }
     }
@@ -653,6 +686,7 @@ fn try_open_pad(
     let key = HardwareKey::new(vid, pid, discriminator);
     let family = infer_family(&gp, vid, pid, &name);
     let transport = infer_transport(&gp, path.as_deref());
+    let present_buttons_mask = detect_present_buttons_mask(&gp);
     let state = snapshot_physical_state(&gp);
     let battery = read_sdl_battery(&gp, family, path.as_deref());
 
@@ -682,6 +716,7 @@ fn try_open_pad(
             family,
             transport,
             instance_id,
+            present_buttons_mask,
             state,
             battery,
             opened_at: Instant::now(),
@@ -964,6 +999,8 @@ fn publish_snapshot(
     snapshot_out: &Arc<Mutex<Arc<EngineSnapshot>>>,
     window_visible: &Arc<AtomicBool>,
     ui_hwnd: &Arc<Mutex<usize>>,
+    editor_visible: &Arc<AtomicBool>,
+    editor_hwnd: &Arc<Mutex<usize>>,
 ) {
     let mut controllers = Vec::new();
     let mut seen_ids = BTreeSet::new();
@@ -997,6 +1034,7 @@ fn publish_snapshot(
             virtual_active: slot.is_some(),
             virtual_serial: slot.map(|s| s.pad.serial_no()),
             battery: pad.battery,
+            present_buttons_mask: pad.present_buttons_mask,
             physical_state: PhysicalSnapshot::from(&pad.state),
             virtual_output: virt_out,
             instance_id: pad.instance_id.clone(),
@@ -1032,6 +1070,7 @@ fn publish_snapshot(
                     virtual_active: true,
                     virtual_serial: Some(slot.pad.serial_no()),
                     battery: *batt,
+                    present_buttons_mask: 0,
                     physical_state: PhysicalSnapshot::default(),
                     virtual_output: virt_out,
                     instance_id: None,
@@ -1052,7 +1091,25 @@ fn publish_snapshot(
         let hwnd_val = *ui_hwnd.lock().unwrap_or_else(|e| e.into_inner());
         if hwnd_val != 0 {
             unsafe {
-                PostMessageW(hwnd_val as HWND, WM_APP_STATE_CHANGED, WPARAM::default(), LPARAM::default());
+                PostMessageW(
+                    hwnd_val as HWND,
+                    WM_APP_STATE_CHANGED,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                );
+            }
+        }
+    }
+    if editor_visible.load(Ordering::Acquire) {
+        let hwnd_val = *editor_hwnd.lock().unwrap_or_else(|e| e.into_inner());
+        if hwnd_val != 0 {
+            unsafe {
+                PostMessageW(
+                    hwnd_val as HWND,
+                    WM_APP_STATE_CHANGED,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                );
             }
         }
     }

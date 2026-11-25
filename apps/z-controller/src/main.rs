@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod diagram;
 mod engine;
 mod sw_painter;
 mod tray_win32;
@@ -8,17 +9,20 @@ mod ui;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 use serde::Serialize;
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use z_core::battery::{BatteryReading, BatteryStatus};
-use z_core::model::{ControllerFamily, HardwareKey, Transport, VirtualTargetKind};
-use z_core::profile::AppConfig;
+use z_core::model::{ControllerFamily, HardwareKey, LogicalButton, Transport, VirtualTargetKind};
+use z_core::profile::{AppConfig, Profile};
 use z_platform_windows::drivers::query_process_memory_bytes;
 use z_sdl3::{SdlGamepadAxis, SdlGamepadButton, SdlVirtualGamepad};
 
 use crate::engine::{
-    ControllerSnapshot, EngineHandle, PhysicalSnapshot, VirtualOutputSnapshot,
+    ControllerSnapshot, EngineCommand, EngineHandle, PhysicalSnapshot, VirtualOutputSnapshot,
     install_emergency_uncloak_hooks,
 };
+use crate::ui::{AppUiState, draw_compact_main_snapshot};
 
 #[derive(Serialize)]
 struct SmokeReport {
@@ -42,11 +46,23 @@ fn main() {
     let mut preview_cards = false;
     let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
+    let mut show_editor_profile: Option<String> = None;
+    let mut probe_profile_switch_json: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--show" | "--open" => open_immediately = true,
+            "--show-editor" => {
+                if i + 1 < args.len() {
+                    show_editor_profile = Some(args[i + 1].clone());
+                    open_immediately = true;
+                    i += 1;
+                } else {
+                    show_editor_profile = Some("xbox-360".to_string());
+                    open_immediately = true;
+                }
+            }
             "--smoke-verify" => {
                 if i + 1 < args.len() {
                     smoke_json_path = Some(PathBuf::from(&args[i + 1]));
@@ -68,9 +84,23 @@ fn main() {
                     i += 1;
                 }
             }
+            "--probe-profile-switch" => {
+                if i + 1 < args.len() {
+                    probe_profile_switch_json = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
+    }
+
+    if let Some(probe_out) = probe_profile_switch_json {
+        if let Err(err) = run_profile_switch_probe(&probe_out) {
+            eprintln!("profile switch probe failed: {err}");
+            std::process::exit(1);
+        }
+        return;
     }
 
     let config_path = AppConfig::default_path();
@@ -180,6 +210,7 @@ fn main() {
                 vp.set_axis(SdlGamepadAxis::LeftTrigger, i16::MIN);
                 vp.set_axis(SdlGamepadAxis::RightTrigger, 12000);
                 vp.set_button(SdlGamepadButton::South, true);
+                vp.set_button(SdlGamepadButton::Misc1, true);
                 vp.pump();
                 engine.wake();
                 std::thread::sleep(Duration::from_millis(60));
@@ -195,11 +226,335 @@ fn main() {
         None
     };
 
-    if let Err(err) = tray_win32::run_tray_app(engine, open_immediately, preview, tray_smoke_ms) {
+    if let Err(err) = tray_win32::run_tray_app(
+        engine,
+        open_immediately,
+        show_editor_profile,
+        preview,
+        tray_smoke_ms,
+    ) {
         eprintln!("z-controller tray error: {err}");
         std::process::exit(1);
     }
     drop(demo_pad);
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ProbeXInputGamepad {
+    buttons: u16,
+    left_trigger: u8,
+    right_trigger: u8,
+    thumb_lx: i16,
+    thumb_ly: i16,
+    thumb_rx: i16,
+    thumb_ry: i16,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ProbeXInputState {
+    packet_number: u32,
+    gamepad: ProbeXInputGamepad,
+}
+
+fn read_xinput_buttons() -> Option<(u32, u16)> {
+    type FnXInputGetState = unsafe extern "system" fn(u32, *mut ProbeXInputState) -> u32;
+    let dll: Vec<u16> = "xinput1_4.dll\0".encode_utf16().collect();
+    let module = unsafe { LoadLibraryW(dll.as_ptr()) };
+    if module.is_null() {
+        return None;
+    }
+    let proc = unsafe { GetProcAddress(module, b"XInputGetState\0".as_ptr()) }?;
+    let func: FnXInputGetState = unsafe { std::mem::transmute_copy(&proc) };
+    for user in 0..4 {
+        let mut st = ProbeXInputState::default();
+        if unsafe { func(user, &mut st) } == 0 {
+            return Some((user, st.gamepad.buttons));
+        }
+    }
+    None
+}
+
+fn find_text_below_y(
+    shapes: &[egui::epaint::ClippedShape],
+    needle: &str,
+    min_y: f32,
+) -> Option<Pos2> {
+    fn scan(s: &egui::Shape, needle: &str, min_y: f32, out: &mut Vec<Pos2>) {
+        match s {
+            egui::Shape::Vec(list) => {
+                for sub in list {
+                    scan(sub, needle, min_y, out);
+                }
+            }
+            egui::Shape::Text(ts) => {
+                if ts.galley.text() == needle {
+                    let c = ts.pos + ts.galley.size() * 0.5;
+                    if c.y >= min_y {
+                        out.push(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut hits = Vec::new();
+    for clipped in shapes {
+        scan(&clipped.shape, needle, min_y, &mut hits);
+    }
+    hits.into_iter()
+        .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+fn find_text_rect_center(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<Pos2> {
+    for clipped in shapes.iter().rev() {
+        if let Some(pos) = find_text_in_shape(&clipped.shape, needle) {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+fn find_text_in_shape(shape: &egui::Shape, needle: &str) -> Option<Pos2> {
+    match shape {
+        egui::Shape::Vec(list) => list.iter().rev().find_map(|s| find_text_in_shape(s, needle)),
+        egui::Shape::Text(ts) => {
+            if ts.galley.text() == needle {
+                Some(ts.pos + ts.galley.size() * 0.5)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn run_egui_click_step(
+    ctx: &egui::Context,
+    ui_state: &mut AppUiState,
+    snap: &crate::engine::EngineSnapshot,
+    time_sec: &mut f64,
+    pos: Option<Pos2>,
+    click: bool,
+    commands: &mut Vec<EngineCommand>,
+) -> Vec<egui::epaint::ClippedShape> {
+    let mut events = Vec::new();
+    if let Some(p) = pos {
+        events.push(Event::PointerMoved(p));
+        if click {
+            events.push(Event::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            });
+        }
+    }
+    let mut run_once = |ev: Vec<Event>| {
+        *time_sec += 0.05;
+        let raw = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 600.0))),
+            time: Some(*time_sec),
+            events: ev,
+            focused: true,
+            ..Default::default()
+        };
+        let out = ctx.run(raw, |c| {
+            draw_compact_main_snapshot(c, ui_state, snap, |cmd| commands.push(cmd));
+        });
+        out.shapes
+    };
+
+    let shapes = run_once(events);
+    if click {
+        if let Some(p) = pos {
+            return run_once(vec![Event::PointerButton {
+                pos: p,
+                button: PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            }]);
+        }
+    }
+    shapes
+}
+
+#[derive(Serialize)]
+struct ProfileSwitchProbeReport {
+    passed: bool,
+    controller_canonical_id: String,
+    before_profile_id: String,
+    after_profile_id: String,
+    xinput_slot: u32,
+    before_xinput_buttons: String,
+    after_xinput_buttons: String,
+    emitted_commands_count: usize,
+    combo_clicked_xy: [f32; 2],
+    item_clicked_xy: [f32; 2],
+}
+
+fn run_profile_switch_probe(out_path: &std::path::Path) -> Result<(), String> {
+    let cfg_path = std::env::temp_dir().join("z-controller-probe-switch.toml");
+    let _ = std::fs::remove_file(&cfg_path);
+
+    let mut cfg = AppConfig::default();
+    let mut probe_swap = Profile::builtin_xbox360();
+    probe_swap.id = "probe-swap".to_string();
+    probe_swap.name = "Probe Swap A->B".to_string();
+    probe_swap
+        .button_remap
+        .insert(LogicalButton::South, Some(LogicalButton::East));
+    cfg.profiles.push(probe_swap);
+    cfg.save_atomic(&cfg_path).map_err(|e| e.to_string())?;
+
+    let mut engine = EngineHandle::start(cfg_path.clone())?;
+    let vp = SdlVirtualGamepad::attach(0x045E, 0x028E, "ZCtrl Probe Pad")
+        .map_err(|e| format!("virtual pad attach failed: {e}"))?;
+
+    for _ in 0..30 {
+        vp.pump();
+        engine.wake();
+        std::thread::sleep(Duration::from_millis(80));
+        let probe_snap = engine.snapshot();
+        if probe_snap
+            .controllers
+            .iter()
+            .any(|c| c.connected && c.key.vid == 0x045E && c.key.pid == 0x028E && c.virtual_active)
+        {
+            break;
+        }
+    }
+
+    // Disable any unrelated physical pads plugged into the host so XInput slot 0 belongs solely to ZCtrl Probe Pad.
+    for c in &engine.snapshot().controllers {
+        if c.key.vid != 0x045E || c.key.pid != 0x028E {
+            engine.send(EngineCommand::SetDeviceEnabled {
+                key: c.key.clone(),
+                enabled: false,
+            });
+        }
+    }
+    std::thread::sleep(Duration::from_millis(120));
+
+    vp.set_button(SdlGamepadButton::South, true);
+    vp.pump();
+    engine.wake();
+    std::thread::sleep(Duration::from_millis(240));
+    let before_snap = engine.snapshot();
+
+    let ctrl = before_snap
+        .controllers
+        .iter()
+        .find(|c| c.key.vid == 0x045E && c.key.pid == 0x028E)
+        .cloned()
+        .ok_or_else(|| "probe pad did not enumerate".to_string())?;
+    let (slot_idx, before_xi) =
+        read_xinput_buttons().ok_or_else(|| "no active XInput slot before switch".to_string())?;
+
+    // Drive the actual compact UI ComboBox via egui RawInput click coordinates.
+    let ctx = egui::Context::default();
+    let mut ui_state = AppUiState::default();
+    let mut emitted = Vec::new();
+    let mut time_sec = 0.0_f64;
+
+    let shapes_idle = run_egui_click_step(
+        &ctx,
+        &mut ui_state,
+        &before_snap,
+        &mut time_sec,
+        None,
+        false,
+        &mut emitted,
+    );
+    let header_y = find_text_rect_center(&shapes_idle, &ctrl.name)
+        .map_or(0.0, |p| p.y);
+    let combo_pos = find_text_below_y(&shapes_idle, &ctrl.profile_name, header_y)
+        .ok_or_else(|| format!("ComboBox text '{}' not found in shapes", ctrl.profile_name))?;
+    let shapes_open = run_egui_click_step(
+        &ctx,
+        &mut ui_state,
+        &before_snap,
+        &mut time_sec,
+        Some(combo_pos),
+        true,
+        &mut emitted,
+    );
+    // Run one extra popup layout frame so egui finishes popup Area sizing.
+    let shapes_popup = run_egui_click_step(
+        &ctx,
+        &mut ui_state,
+        &before_snap,
+        &mut time_sec,
+        None,
+        false,
+        &mut emitted,
+    );
+    let item_pos = find_text_rect_center(&shapes_popup, "Probe Swap A->B")
+        .or_else(|| find_text_rect_center(&shapes_open, "Probe Swap A->B"))
+        .ok_or_else(|| "ComboBox popup item 'Probe Swap A->B' not found".to_string())?;
+    let _ = run_egui_click_step(
+        &ctx,
+        &mut ui_state,
+        &before_snap,
+        &mut time_sec,
+        Some(item_pos),
+        true,
+        &mut emitted,
+    );
+
+    let cmd_count = emitted.len();
+    for cmd in emitted {
+        engine.send(cmd);
+    }
+    vp.set_button(SdlGamepadButton::South, true);
+    vp.pump();
+    engine.wake();
+    std::thread::sleep(Duration::from_millis(260));
+
+    let after_snap = engine.snapshot();
+    let after_ctrl = after_snap
+        .controllers
+        .iter()
+        .find(|c| c.canonical_id == ctrl.canonical_id)
+        .cloned()
+        .ok_or_else(|| "controller missing after switch".to_string())?;
+    let (_, after_xi) =
+        read_xinput_buttons().ok_or_else(|| "no active XInput slot after switch".to_string())?;
+
+    let passed = cmd_count >= 1
+        && ctrl.profile_id == "xbox-360"
+        && after_ctrl.profile_id == "probe-swap"
+        && before_xi == 0x1000
+        && after_xi == 0x2000;
+
+    let report = ProfileSwitchProbeReport {
+        passed,
+        controller_canonical_id: ctrl.canonical_id,
+        before_profile_id: ctrl.profile_id,
+        after_profile_id: after_ctrl.profile_id,
+        xinput_slot: slot_idx,
+        before_xinput_buttons: format!("0x{before_xi:04X}"),
+        after_xinput_buttons: format!("0x{after_xi:04X}"),
+        emitted_commands_count: cmd_count,
+        combo_clicked_xy: [combo_pos.x, combo_pos.y],
+        item_clicked_xy: [item_pos.x, item_pos.y],
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&report) {
+        let _ = std::fs::write(out_path, json);
+    }
+
+    drop(vp);
+    engine.shutdown();
+    let _ = std::fs::remove_file(&cfg_path);
+
+    if !passed {
+        return Err(format!(
+            "probe assertions failed: before=0x{before_xi:04X} after=0x{after_xi:04X} profile={}->{}" ,
+            report.before_profile_id, report.after_profile_id
+        ));
+    }
+    Ok(())
 }
 
 fn build_preview_cards() -> Vec<ControllerSnapshot> {
@@ -213,8 +568,8 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
             transport: Transport::Bluetooth,
             connected: true,
             enabled: true,
-            profile_id: "x360-fifa".to_string(),
-            profile_name: "Xbox 360 Default (FIFA)".to_string(),
+            profile_id: "switch-pro".to_string(),
+            profile_name: "Nintendo Switch Pro Controller".to_string(),
             target_kind: VirtualTargetKind::Xbox360,
             cloaked: true,
             virtual_active: true,
@@ -224,6 +579,7 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
                 status: BatteryStatus::OnBattery,
                 source: "sdl3",
             },
+            present_buttons_mask: 0x0001_FFFF,
             physical_state: PhysicalSnapshot::default(),
             virtual_output: VirtualOutputSnapshot::None,
             instance_id: None,
@@ -237,8 +593,8 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
             transport: Transport::Usb,
             connected: true,
             enabled: false,
-            profile_id: "ds4-default".to_string(),
-            profile_name: "DualShock 4 Default".to_string(),
+            profile_id: "dualsense".to_string(),
+            profile_name: "DualSense".to_string(),
             target_kind: VirtualTargetKind::DualShock4,
             cloaked: false,
             virtual_active: false,
@@ -248,6 +604,7 @@ fn build_preview_cards() -> Vec<ControllerSnapshot> {
                 status: BatteryStatus::OnBattery,
                 source: "sony-hid",
             },
+            present_buttons_mask: 0x001F_FFFF,
             physical_state: PhysicalSnapshot::default(),
             virtual_output: VirtualOutputSnapshot::None,
             instance_id: None,

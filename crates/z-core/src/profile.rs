@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use crate::model::{DisconnectPolicy, HardwareKey, LogicalButton, VirtualTargetKind};
+use crate::model::{
+    ControllerFamily, DisconnectPolicy, HardwareKey, LogicalButton, VirtualTargetKind,
+};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -19,6 +21,8 @@ pub enum ConfigError {
 pub struct Profile {
     pub id: String,
     pub name: String,
+    #[serde(default = "default_family")]
+    pub family: ControllerFamily,
     pub target: VirtualTargetKind,
     #[serde(default = "default_true")]
     pub cloak_physical: bool,
@@ -36,6 +40,10 @@ pub struct Profile {
     pub button_remap: BTreeMap<LogicalButton, Option<LogicalButton>>,
 }
 
+fn default_family() -> ControllerFamily {
+    ControllerFamily::Xbox
+}
+
 fn default_true() -> bool {
     true
 }
@@ -45,10 +53,11 @@ fn default_deadzone() -> f32 {
 }
 
 impl Profile {
-    pub fn default_x360() -> Self {
+    pub fn builtin_xbox360() -> Self {
         Self {
-            id: "x360-fifa".to_string(),
-            name: "Xbox 360 Default (FIFA)".to_string(),
+            id: "xbox-360".to_string(),
+            name: "Xbox 360".to_string(),
+            family: ControllerFamily::Xbox,
             target: VirtualTargetKind::Xbox360,
             cloak_physical: true,
             disconnect_policy: DisconnectPolicy::KeepNeutral,
@@ -60,10 +69,11 @@ impl Profile {
         }
     }
 
-    pub fn default_ds4() -> Self {
+    pub fn builtin_dualsense() -> Self {
         Self {
-            id: "ds4-default".to_string(),
-            name: "DualShock 4 Default".to_string(),
+            id: "dualsense".to_string(),
+            name: "DualSense".to_string(),
+            family: ControllerFamily::Sony,
             target: VirtualTargetKind::DualShock4,
             cloak_physical: true,
             disconnect_policy: DisconnectPolicy::KeepNeutral,
@@ -73,6 +83,26 @@ impl Profile {
             rumble_enabled: true,
             button_remap: BTreeMap::new(),
         }
+    }
+
+    pub fn builtin_switch_pro() -> Self {
+        Self {
+            id: "switch-pro".to_string(),
+            name: "Nintendo Switch Pro Controller".to_string(),
+            family: ControllerFamily::Nintendo,
+            target: VirtualTargetKind::Xbox360,
+            cloak_physical: true,
+            disconnect_policy: DisconnectPolicy::KeepNeutral,
+            swap_ab_xy: false,
+            left_deadzone: 0.10,
+            right_deadzone: 0.10,
+            rumble_enabled: true,
+            button_remap: BTreeMap::new(),
+        }
+    }
+
+    pub fn is_builtin_id(id: &str) -> bool {
+        matches!(id, "xbox-360" | "dualsense" | "switch-pro")
     }
 }
 
@@ -94,14 +124,18 @@ pub struct AppConfig {
 }
 
 fn default_profile_id() -> String {
-    "x360-fifa".to_string()
+    "xbox-360".to_string()
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             default_profile_id: default_profile_id(),
-            profiles: vec![Profile::default_x360(), Profile::default_ds4()],
+            profiles: vec![
+                Profile::builtin_xbox360(),
+                Profile::builtin_dualsense(),
+                Profile::builtin_switch_pro(),
+            ],
             bindings: BTreeMap::new(),
         }
     }
@@ -142,11 +176,37 @@ impl AppConfig {
     }
 
     pub fn ensure_valid(&mut self) {
-        if self.profiles.is_empty() {
-            self.profiles = vec![Profile::default_x360(), Profile::default_ds4()];
+        // Migrate legacy v1 default IDs to clean built-in defaults.
+        for b in self.bindings.values_mut() {
+            if b.profile_id == "x360-fifa" {
+                b.profile_id = "xbox-360".to_string();
+            } else if b.profile_id == "ds4-default" {
+                b.profile_id = "dualsense".to_string();
+            }
         }
-        if !self.profiles.iter().any(|p| p.id == self.default_profile_id) {
-            self.default_profile_id = self.profiles[0].id.clone();
+        if self.default_profile_id == "x360-fifa" {
+            self.default_profile_id = "xbox-360".to_string();
+        } else if self.default_profile_id == "ds4-default" {
+            self.default_profile_id = "dualsense".to_string();
+        }
+        self.profiles
+            .retain(|p| p.id != "x360-fifa" && p.id != "ds4-default");
+
+        for builtin in [
+            Profile::builtin_xbox360(),
+            Profile::builtin_dualsense(),
+            Profile::builtin_switch_pro(),
+        ] {
+            if !self.profiles.iter().any(|p| p.id == builtin.id) {
+                self.profiles.push(builtin);
+            }
+        }
+        if !self
+            .profiles
+            .iter()
+            .any(|p| p.id == self.default_profile_id)
+        {
+            self.default_profile_id = "xbox-360".to_string();
         }
         for p in &mut self.profiles {
             p.left_deadzone = p.left_deadzone.clamp(0.0, 0.50);
@@ -186,10 +246,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_ships_exact_three_clean_builtin_profiles() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.profiles.len(), 3);
+        assert_eq!(cfg.profiles[0].id, "xbox-360");
+        assert_eq!(cfg.profiles[0].name, "Xbox 360");
+        assert_eq!(cfg.profiles[0].target, VirtualTargetKind::Xbox360);
+        assert!(!cfg.profiles[0].swap_ab_xy);
+
+        assert_eq!(cfg.profiles[1].id, "dualsense");
+        assert_eq!(cfg.profiles[1].name, "DualSense");
+        assert_eq!(cfg.profiles[1].family, ControllerFamily::Sony);
+        assert_eq!(cfg.profiles[1].target, VirtualTargetKind::DualShock4);
+        assert!(!cfg.profiles[1].swap_ab_xy);
+
+        assert_eq!(cfg.profiles[2].id, "switch-pro");
+        assert_eq!(cfg.profiles[2].name, "Nintendo Switch Pro Controller");
+        assert_eq!(cfg.profiles[2].family, ControllerFamily::Nintendo);
+        assert!(!cfg.profiles[2].swap_ab_xy);
+    }
+
+    #[test]
     fn config_round_trip_and_binding_resolution() {
         let mut cfg = AppConfig::default();
         let key = HardwareKey::new(0x057E, 0x2009, "NSP98b6b0d12a2c");
-        cfg.set_device_binding(&key, "ds4-default".to_string(), true);
+        cfg.set_device_binding(&key, "dualsense".to_string(), true);
         let dir = std::env::temp_dir().join(format!("z_ctrl_cfg_test_{}", std::process::id()));
         let file = dir.join("config.toml");
         cfg.save_atomic(&file).unwrap();
