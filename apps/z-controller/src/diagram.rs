@@ -411,7 +411,7 @@ pub fn draw_controller_diagram(
             pt(Pos2::new(0.50, 0.92)),
             Align2::CENTER_CENTER,
             "Click part to select",
-            FontId::new(10.0, FontFamily::Proportional),
+            FontId::new(10.5, FontFamily::Proportional),
             pal.muted,
         );
     }
@@ -797,7 +797,7 @@ fn paint_center_icon(
                 Pos2::new(center.x, center.y + 3.0),
                 Align2::CENTER_CENTER,
                 "Touchpad",
-                FontId::new(10.0, FontFamily::Proportional),
+                FontId::new(10.5, FontFamily::Proportional),
                 color,
             );
         }
@@ -822,7 +822,7 @@ fn paint_center_icon(
                 center,
                 Align2::CENTER_CENTER,
                 "PS",
-                FontId::new(10.0, FontFamily::Proportional),
+                FontId::new(10.5, FontFamily::Proportional),
                 color,
             );
         }

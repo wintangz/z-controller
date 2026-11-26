@@ -14,7 +14,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
     BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
@@ -61,10 +62,10 @@ const CLEAR_BG_DARK_RGB: u32 = 0x000A_0A10;
 const CLEAR_BG_LIGHT_RGB: u32 = 0x00EE_F4FA;
 
 // Logical client dimensions at 96 DPI (exact same UI geometry at 100%, scaled cleanly per monitor DPI).
-const COMPACT_CLIENT_LOGICAL_W: i32 = 396;
+const COMPACT_CLIENT_LOGICAL_W: i32 = 412;
 const COMPACT_CLIENT_LOGICAL_H: i32 = 601;
 const COMPACT_CLIENT_MIN_LOGICAL_H: i32 = 150;
-const COMPACT_CLIENT_MAX_AUTO_LOGICAL_H: i32 = 760;
+const COMPACT_CLIENT_MAX_AUTO_LOGICAL_H: i32 = 960;
 const EDITOR_CLIENT_LOGICAL_W: i32 = 1024;
 const EDITOR_CLIENT_LOGICAL_H: i32 = 641;
 // Main compact window locks horizontal width (no Maximize, vertical resize only).
@@ -295,6 +296,7 @@ struct WindowHostState {
     visible: bool,
     followup_paint_budget: u8,
     in_size_move: bool,
+    mouse_tracking: bool,
     pending_state_refresh: bool,
     needs_redraw: bool,
     dirty_only_rect: Option<RECT>,
@@ -333,6 +335,8 @@ pub fn run_tray_app(
     preview_driver_status: Option<DriverStatus>,
     preview_theme_mode: Option<ThemeMode>,
     preview_confirm_driver: Option<DriverId>,
+    preview_expand_drivers: bool,
+    preview_hover_refresh: bool,
     smoke_exit_after_ms: Option<u64>,
     test_dpi: Option<u32>,
 ) -> Result<(), String> {
@@ -362,6 +366,10 @@ pub fn run_tray_app(
 
     let mut init_ui_state = AppUiState::default();
     init_ui_state.pending_install_confirm = preview_confirm_driver;
+    if preview_expand_drivers {
+        init_ui_state.drivers_section_override = Some(true);
+        init_ui_state.last_all_drivers_working = Some(true);
+    }
 
     let shared = Arc::new(AppShared {
         engine: Arc::new(Mutex::new(engine)),
@@ -398,19 +406,29 @@ pub fn run_tray_app(
                 .theme_mode
         });
 
+    let mut init_events = Vec::new();
+    if preview_hover_refresh {
+        // Refresh button (68x28) sits flush against the right content margin (12px) in the masthead row (top=12, h=28).
+        init_events.push(Event::PointerMoved(Pos2::new(
+            (COMPACT_CLIENT_LOGICAL_W as f32) - 12.0 - 34.0,
+            12.0 + 14.0,
+        )));
+    }
+
     let main_state = Box::new(WindowHostState {
         shared: Arc::clone(&shared),
         role: WindowRole::Main,
         ui_session: None,
         applied_titlebar_theme: if show_main { Some(init_theme) } else { None },
-        events: Vec::new(),
+        events: init_events,
         width: (COMPACT_CLIENT_LOGICAL_W as f32 * dpi_to_ppp(init_dpi)).round() as usize,
         height: (COMPACT_CLIENT_LOGICAL_H as f32 * dpi_to_ppp(init_dpi)).round() as usize,
         dpi: init_dpi,
         pixels_per_point: dpi_to_ppp(init_dpi),
         visible: show_main,
-        followup_paint_budget: 0,
+        followup_paint_budget: if preview_hover_refresh { 2 } else { 0 },
         in_size_move: false,
+        mouse_tracking: false,
         pending_state_refresh: false,
         needs_redraw: true,
         dirty_only_rect: None,
@@ -636,6 +654,7 @@ fn open_editor_window(shared: &Arc<AppShared>, controller_id: Option<&str>, prof
             visible: true,
             followup_paint_budget: 2,
             in_size_move: false,
+            mouse_tracking: false,
             pending_state_refresh: false,
             needs_redraw: true,
             dirty_only_rect: None,
@@ -1274,8 +1293,29 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEMOVE => {
             let (x, y) = lp_xy(lparam);
             let st = unsafe { &mut *state_ptr };
+            if !st.mouse_tracking {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                unsafe { TrackMouseEvent(&mut tme) };
+                st.mouse_tracking = true;
+            }
             let pos = physical_to_logical_pos(x, y, st.pixels_per_point);
             st.events.push(Event::PointerMoved(pos));
+            st.followup_paint_budget = 1;
+            st.needs_redraw = true;
+            st.dirty_only_rect = None;
+            unsafe { InvalidateRect(hwnd, null(), 0) };
+            0
+        }
+        0x02A3 /* WM_MOUSELEAVE */ => {
+            let st = unsafe { &mut *state_ptr };
+            st.mouse_tracking = false;
+            st.events.push(Event::PointerGone);
+            st.followup_paint_budget = 1;
             st.needs_redraw = true;
             st.dirty_only_rect = None;
             unsafe { InvalidateRect(hwnd, null(), 0) };

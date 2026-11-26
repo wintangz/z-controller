@@ -2,6 +2,7 @@
 
 mod diagram;
 mod engine;
+mod logo_mark;
 mod sw_painter;
 mod tray_win32;
 mod ui;
@@ -62,6 +63,8 @@ fn main() {
     let mut preview_missing_drivers = false;
     let mut preview_theme_mode: Option<ThemeMode> = None;
     let mut preview_confirm_driver: Option<DriverId> = None;
+    let mut preview_expand_drivers = false;
+    let mut preview_hover_refresh = false;
     let mut dry_run_install_driver: Option<DriverId> = None;
     let mut log_path_override: Option<PathBuf> = None;
     let mut live_demo_pad = false;
@@ -116,6 +119,14 @@ fn main() {
                     open_immediately = true;
                     i += 1;
                 }
+            }
+            "--preview-expand-drivers" => {
+                preview_expand_drivers = true;
+                open_immediately = true;
+            }
+            "--preview-hover-refresh" => {
+                preview_hover_refresh = true;
+                open_immediately = true;
             }
             "--dry-run-install" => {
                 if i + 1 < args.len() {
@@ -328,6 +339,8 @@ fn main() {
         preview_driver_status,
         preview_theme_mode,
         preview_confirm_driver,
+        preview_expand_drivers,
+        preview_hover_refresh,
         tray_smoke_ms,
         test_dpi,
     ) {
