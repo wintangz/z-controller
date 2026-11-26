@@ -4,7 +4,7 @@
 > **Reference Implementation**: **`z-controller`** (`Y:\Repos\z-controller`) is the reference implementation for all shared controls, theme tokens, rim shaders, and outline button geometry.
 > **Adoption Rule**: Any WT application adopting this standard MUST copy `DESIGN.md` into its repository root and implement **Part I — Shared Core** unchanged. Application-specific layouts, domain widgets, and intentional deviations belong strictly inside that application's own section under **Part II — App-Specific Sections**.
 
-**Last Updated**: 2026-11-26 (`polish-fix-2`)
+**Last Updated**: 2026-11-26 (`ui-fix-3`)
 
 ---
 
@@ -136,6 +136,16 @@ All shared interactive controls mirror **`z-controller`** (`Y:\Repos\z-controlle
 - **Checkboxes**: `16x16 px` `RADIUS_PILL = 4.0px` box (`pill_blue_fill` + `accent_line` + `1.75pt` `accent_line` check stroke when checked; `widget_hover` + `accent_line` hovered; `input_bg` + `border` unchecked).
 - **Scrollbars**: Non-floating `6.0px` vertical thumb (`scrollbar_thumb` -> `scrollbar_thumb_hover` -> `accent_line`), `handle_min_length = 24.0`, `SPACE_8` (`8px`) inner gutter (`bar_outer_margin = 0.0`).
 
+### 6.4 WT Header Lockup & Application Icon Standard
+- **Original Brand Mark Only**: Every WT application embeds the original unmodified WT mark (`assets/logo-mark.png`, `include_bytes!`, transparent background — no added background tile, container border, or app-specific glyph fusion) for both the multi-size `.exe`/window icon (`16px`–`256px` across title bar, taskbar, Alt-Tab, and Explorer) and the in-app header lockup.
+- **Header Lockup Geometry**: Left-aligned on the top header row (`HEADER_CONTROL_H = 28.0px` vertical centreline):
+  1. **Logo Mark**: **`24 x 24 px`** logical (`24 * pixels_per_point` physical, premultiplied-alpha area-downsampled from source artwork), transparent backdrop, optically centred vertically inside the `28.0px` row (`2.0px` top/bottom margin).
+  2. **Logo-to-Name Gap**: **`SPACE_8` (`8.0px`)**.
+  3. **App Name**: **`T1` `16.0pt` `Segoe UI` Regular** in primary `text` (`#EDEDF2` Dark / `#1C2733` Light), optically centred on the row centreline.
+  4. **Name-to-Caption Gap**: **`SPACE_8` (`8.0px`)**.
+  5. **Muted Inline Caption**: **`T4` `11.5pt` `Segoe UI` Regular** in `muted` (`#9A9AB0` Dark / `#5F7186` Light; semantic status colour permitted only during active transient operations), optically centred cleanly and single-line truncated before the right-hand action control cluster.
+- **Settings / About Surface**: Any Settings or About surface repeats the same `24px` WT logo mark + `16.0pt` app name + `11.5pt` muted descriptor lockup.
+
 ---
 
 ## 7. Chip Discipline
@@ -165,12 +175,13 @@ Before accepting screenshots of any WT application, verify **`FC1`–`FC9`**:
 - **FC1 (No Card Soup)**: List rows and summary lines sit inside hairline-divided ledger panels rather than repeating stacked individual cards.
 - **FC2 (Restrained Numeral Weight & Clear Row Hierarchy)**: Right-aligned `T2` totals lead cleanly by scale and luminance (`13.0pt`–`13.5pt` Regular/Medium, never heavy Bold slabs) alongside `T3` `Segoe UI Semibold` app names and quiet `T4` metadata.
 - **FC3 (State-Signal Gradient Rim Only)**: Diagonal gradient rims (`#54B9F2 -> #D8A6FF -> #F7A8D8`) appear strictly on active/expanded containers; zero collapsed containers or non-status pills use solid pastel fills.
-- **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, `2px` status badges, and `0px` hairline ledger rows.
+- **FC4 (Multi-Tier Corner Radii)**: Visible separation across `8px` panels/rims, `6px` buttons/inputs, `4px` filter pills/checkboxes, `3.5px–4px` chunky meter tracks, full-pill (`0.5 * h`) status badges, and `0px` hairline ledger rows.
 - **FC5 (Saturated Status Discipline)**: Saturated `#28D66C` / `#F04458` (`#0FA84F` / `#E02444` Light) marks appear strictly on live status dots, threshold/battery alerts, signed deltas, safety locks, and zone marks — while metadata, proportions, and qualifiers stay calm pastel/neutral.
 - **FC6 (Outline Button Hierarchy & Crisp `1px` Rings)**: `3x` cropped header/panel buttons show unbroken `1px` rings across Dark and Light modes, clear `PrimaryOutline` / `SecondaryOutline` / `SubtleOutline` hierarchy, and sharp moon/sun icon contrast.
 - **FC7 (`>= 10.5pt` Floor)**: All visible labels, badges, captions, and tooltips meet or exceed `10.5pt`.
 - **FC8 (Dual-Mode Surface & Input Separation)**: Both Dark (`#0A0A10` / `#10101A` / `#14141F`) and Light (`#EEF4FA` / `#F4F8FC` / `#FFFFFF`) preserve distinct surface tiers and recessed `input_bg` wells.
 - **FC9 (Content-Hugging & Top-Left Sparse States)**: Empty or sparse panels align top-left cleanly without floating centred whitespace or orphaned headers.
+- **FC10 (WT Brand Lockup & Unmodified Mark)**: Main header, Settings/About surface, and OS window chrome render the original transparent WT mark (`24px` in-app lockup + `SPACE_8` + `16.0pt` app name + `SPACE_8` + `11.5pt` muted caption) with crisp alpha anti-aliasing in both Dark and Light modes and zero added tile or border.
 
 ---
 
@@ -188,6 +199,7 @@ Each section below documents only what is unique to an individual WT application
 
 ## 11. App-Specific: `y-storage`
 
+- **Header & Settings Lockup**: Top header row (`Main`, `Settings`, `Dependencies`) renders `[24x24 WT mark] + 8px + "y-storage" (16.0pt text) + 8px + "Read-only · Last scan: <timestamp> · <duration>s"` (`11.5pt muted`, switching to live progress telemetry while scanning), paired with right-aligned `[ThemeToggle] [Rescan] [Settings / Back to Apps]`. `Settings` closes with an `8px` `panel` About card repeating the `24px` WT lockup (`"y-storage"` + `"v0.1.0 · WT family read-only storage & dependency inspector"`).
 - **Drive Instrument Header**: Physical fixed drives sit in horizontal `8px` pods whose headline figure is **free space** (`T1`, `14.5pt` `Consolas Regular`), anchored by a full-width `7px` chunky rounded capacity meter (`Rounding 3.5` outer, `Rounding 2.5` fill) rendered in the unified 3-stop WT horizontal gradient (`LOGO_BLUE #54B9F2 -> LOGO_LAVENDER #D8A6FF -> LOGO_PINK #F7A8D8` mapped across `0%..100%` of the full track width, clipped to fill fraction; saturated `STATUS_RED` only if a drive scan fails or is unreachable).
 - **Tabular App Footprint Ledger & Inspection Drawer**:
   - Sticky `26px` sortable column header (`Chevron · App name · Publisher · Category · Growth delta · Total size`), clicking `App name`, `Publisher`, `Category`, `Growth delta`, or `Total size` sorts (`Size` desc default).

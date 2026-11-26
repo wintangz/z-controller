@@ -3,6 +3,7 @@
 mod diagram;
 mod engine;
 mod logo_mark;
+mod logo_png;
 mod sw_painter;
 mod tray_win32;
 mod ui;

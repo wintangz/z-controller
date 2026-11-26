@@ -15,3 +15,8 @@
   - `Working` driver cards show NO action buttons (`name`, `REQUIRED`/`OPTIONAL` chip, publisher, version, `Status: Working` — nothing else).
   - `"I already have this — Locate…"` and `"Reinstall (Later Option)…"` render ONLY in non-Working states.
   - When all drivers report `Working`, the `Drivers` section is hidden by default and the main window shrinks to hug remaining content; it auto-appears expanded if any driver becomes non-Working, with a manual icon chevron toggle in the status bar and `Drivers` header.
+- **FIX 4 — App Icon = Original WT Mark**:
+  - Replace the application icon (`1 ICON`) with the original unmodified WT mark generated from `assets/logo-mark.png` across sizes `16/20/24/32/40/48/64/128/256` (`apps/z-controller/assets/wt-app.ico`), using the exact trimmed `1.04x` framing matching `y-storage`.
+  - Applies everywhere the app icon appears: exe file icon, window title bar, taskbar button, Alt-Tab, and system tray icon.
+  - Keep `apps/z-controller/assets/z-controller.ico` (the fused WT + controller asset) untouched in the repo.
+
