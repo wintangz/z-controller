@@ -93,7 +93,7 @@ pub fn interface_path_to_instance_id(interface_path: &str) -> Option<String> {
     None
 }
 
-fn read_devnode_string_prop(devinst: u32, prop: u32) -> Vec<String> {
+pub(crate) fn read_devnode_string_prop(devinst: u32, prop: u32) -> Vec<String> {
     let mut reg_type = 0u32;
     let mut bytes_needed = 0u32;
     unsafe {

@@ -1,4 +1,5 @@
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Instant;
@@ -10,12 +11,15 @@ use windows_sys::Win32::Foundation::{FreeLibrary, HINSTANCE, HWND, LPARAM, LRESU
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
+use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree};
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, NIF_ICON, NIF_MESSAGE, NIF_TIP,
+    NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, SHBrowseForFolderW, SHGetPathFromIDListW,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -32,9 +36,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_THICKFRAME,
 };
 use z_core::backend::DriverStatus;
+use z_core::driver::DriverId;
 use z_core::profile::ThemeMode;
 
-use crate::engine::{ControllerSnapshot, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
+use crate::engine::{ControllerSnapshot, EngineCommand, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
 use crate::ui::{
     AppUiState, UiAction, configure_neon_theme_and_fonts, draw_compact_main_snapshot,
@@ -327,6 +332,7 @@ pub fn run_tray_app(
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     preview_driver_status: Option<DriverStatus>,
     preview_theme_mode: Option<ThemeMode>,
+    preview_confirm_driver: Option<DriverId>,
     smoke_exit_after_ms: Option<u64>,
     test_dpi: Option<u32>,
 ) -> Result<(), String> {
@@ -354,9 +360,12 @@ pub fn run_tray_app(
         return Err("RegisterClassExW failed".into());
     }
 
+    let mut init_ui_state = AppUiState::default();
+    init_ui_state.pending_install_confirm = preview_confirm_driver;
+
     let shared = Arc::new(AppShared {
         engine: Arc::new(Mutex::new(engine)),
-        ui_state: Mutex::new(AppUiState::default()),
+        ui_state: Mutex::new(init_ui_state),
         preview_controllers,
         preview_driver_status,
         preview_theme_mode,
@@ -1096,6 +1105,18 @@ unsafe extern "system" fn wnd_proc(
                     }
                     if let Some(preview_ds) = shared.preview_driver_status.as_ref() {
                         cloned.driver_status = preview_ds.clone();
+                        if !preview_ds.vigem_working() {
+                            for c in &mut cloned.controllers {
+                                c.enabled = false;
+                                c.virtual_active = false;
+                                c.virtual_serial = None;
+                            }
+                        }
+                        if !preview_ds.hidhide_working() {
+                            for c in &mut cloned.controllers {
+                                c.cloaked = false;
+                            }
+                        }
                     }
                     if let Some(tm) = shared.preview_theme_mode {
                         cloned.config.theme_mode = tm;
@@ -1235,6 +1256,16 @@ unsafe extern "system" fn wnd_proc(
                     } => {
                         let shared = unsafe { Arc::clone(&(*state_ptr).shared) };
                         open_editor_window(&shared, Some(&controller_id), &profile_id);
+                    }
+                    UiAction::BrowseDriverFolder { driver } => {
+                        if let Some(folder) = pick_folder_dialog(hwnd, driver) {
+                            let shared = unsafe { Arc::clone(&(*state_ptr).shared) };
+                            shared
+                                .engine
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .send(EngineCommand::LocateDriverFolder { driver, folder });
+                        }
                     }
                 }
             }
@@ -1425,6 +1456,41 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn pick_folder_dialog(hwnd: HWND, driver: DriverId) -> Option<PathBuf> {
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+    unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED) };
+    let title: Vec<u16> = format!(
+        "Locate existing {} (nefarius) folder\0",
+        driver.display_name()
+    )
+    .encode_utf16()
+    .collect();
+    let mut display = [0u16; 260];
+    let mut bi: BROWSEINFOW = unsafe { std::mem::zeroed() };
+    bi.hwndOwner = hwnd;
+    bi.pszDisplayName = display.as_mut_ptr();
+    bi.lpszTitle = title.as_ptr();
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    let pidl = unsafe { SHBrowseForFolderW(&mut bi) };
+    if pidl.is_null() {
+        return None;
+    }
+    let mut path_buf = [0u16; 1024];
+    let ok = unsafe { SHGetPathFromIDListW(pidl, path_buf.as_mut_ptr()) };
+    unsafe { CoTaskMemFree(pidl.cast()) };
+    if ok == 0 {
+        return None;
+    }
+    let nul = path_buf.iter().position(|&c| c == 0).unwrap_or(path_buf.len());
+    let s = String::from_utf16_lossy(&path_buf[..nul]);
+    if s.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(s))
     }
 }
 

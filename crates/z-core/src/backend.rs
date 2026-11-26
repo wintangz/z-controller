@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::Receiver;
 use thiserror::Error;
 
+use crate::driver::{DriverEntryStatus, DriverId};
 use crate::model::{
     DisconnectPolicy, HardwareKey, RumbleCommand, VirtualOutputReport, VirtualTargetKind,
 };
@@ -26,13 +27,43 @@ pub struct BackendCapabilities {
     pub can_forward_rumble: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverStatus {
-    pub vigem_installed: bool,
-    pub hidhide_installed: bool,
-    pub hidhide_accessible: bool,
-    pub hidhide_error: Option<String>,
-    pub reboot_recommended: bool,
+    pub vigem: DriverEntryStatus,
+    pub hidhide: DriverEntryStatus,
+}
+
+impl Default for DriverStatus {
+    fn default() -> Self {
+        Self {
+            vigem: DriverEntryStatus::not_installed(DriverId::ViGEmBus),
+            hidhide: DriverEntryStatus::not_installed(DriverId::HidHide),
+        }
+    }
+}
+
+impl DriverStatus {
+    pub fn entry(&self, id: DriverId) -> &DriverEntryStatus {
+        match id {
+            DriverId::ViGEmBus => &self.vigem,
+            DriverId::HidHide => &self.hidhide,
+        }
+    }
+
+    pub fn vigem_working(&self) -> bool {
+        self.vigem.state.is_working()
+    }
+
+    pub fn hidhide_working(&self) -> bool {
+        self.hidhide.state.is_working()
+    }
+
+    pub fn all_working_for_tests() -> Self {
+        Self {
+            vigem: DriverEntryStatus::working(DriverId::ViGEmBus, Some("1.22.0".to_string())),
+            hidhide: DriverEntryStatus::working(DriverId::HidHide, Some("1.5.230".to_string())),
+        }
+    }
 }
 
 pub trait VirtualPadHandle: Send {
@@ -273,12 +304,7 @@ mod tests {
             }
         }
         fn driver_status(&self) -> DriverStatus {
-            DriverStatus {
-                vigem_installed: true,
-                hidhide_installed: true,
-                hidhide_accessible: true,
-                ..Default::default()
-            }
+            DriverStatus::all_working_for_tests()
         }
         fn spawn_virtual_pad(
             &mut self,

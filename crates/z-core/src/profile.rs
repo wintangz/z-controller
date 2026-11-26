@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::driver::DriverId;
 use crate::model::{
     ControllerFamily, DisconnectPolicy, HardwareKey, LogicalButton, VirtualTargetKind,
 };
@@ -139,6 +140,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub theme_mode: ThemeMode,
     #[serde(default)]
+    pub vigem_located_dir: Option<String>,
+    #[serde(default)]
+    pub hidhide_located_dir: Option<String>,
+    #[serde(default)]
     pub profiles: Vec<Profile>,
     #[serde(default)]
     pub bindings: BTreeMap<String, ControllerBinding>,
@@ -153,6 +158,8 @@ impl Default for AppConfig {
         Self {
             default_profile_id: default_profile_id(),
             theme_mode: ThemeMode::Dark,
+            vigem_located_dir: None,
+            hidhide_located_dir: None,
             profiles: vec![
                 Profile::builtin_xbox360(),
                 Profile::builtin_dualsense(),
@@ -281,6 +288,20 @@ impl AppConfig {
                 show_live_input,
             },
         );
+    }
+
+    pub fn located_dir(&self, driver: DriverId) -> Option<&str> {
+        match driver {
+            DriverId::ViGEmBus => self.vigem_located_dir.as_deref(),
+            DriverId::HidHide => self.hidhide_located_dir.as_deref(),
+        }
+    }
+
+    pub fn set_located_dir(&mut self, driver: DriverId, dir: Option<String>) {
+        match driver {
+            DriverId::ViGEmBus => self.vigem_located_dir = dir,
+            DriverId::HidHide => self.hidhide_located_dir = dir,
+        }
     }
 }
 

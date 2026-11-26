@@ -12,10 +12,14 @@ use std::time::Duration;
 use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 use serde::Serialize;
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use z_core::backend::DriverStatus;
 use z_core::battery::{BatteryReading, BatteryStatus};
+use z_core::driver::{DriverEntryStatus, DriverId, DriverState, NotRunningReason};
 use z_core::model::{ControllerFamily, HardwareKey, LogicalButton, Transport, VirtualTargetKind};
 use z_core::profile::{AppConfig, Profile, ThemeMode};
-use z_platform_windows::drivers::query_process_memory_bytes;
+use z_platform_windows::drivers::{
+    AppLog, dry_run_installer_spec, query_process_memory_bytes,
+};
 use z_sdl3::{SdlGamepadAxis, SdlGamepadButton, SdlVirtualGamepad};
 
 use crate::engine::{
@@ -27,12 +31,22 @@ use crate::ui::{AppUiState, draw_compact_main_snapshot};
 #[derive(Serialize)]
 struct SmokeReport {
     controllers: Vec<ControllerSnapshot>,
-    driver_vigem_installed: bool,
-    driver_hidhide_installed: bool,
-    driver_hidhide_accessible: bool,
-    driver_hidhide_error: Option<String>,
+    vigem_working: bool,
+    vigem_state: String,
+    vigem_version: Option<String>,
+    hidhide_working: bool,
+    hidhide_state: String,
+    hidhide_version: Option<String>,
     working_set_bytes: u64,
     private_bytes: u64,
+}
+
+fn parse_driver_id_arg(s: &str) -> Option<DriverId> {
+    match s.to_ascii_lowercase().as_str() {
+        "vigem" | "vigembus" => Some(DriverId::ViGEmBus),
+        "hidhide" => Some(DriverId::HidHide),
+        _ => None,
+    }
 }
 
 fn main() {
@@ -47,6 +61,9 @@ fn main() {
     let mut preview_one_collapsed = false;
     let mut preview_missing_drivers = false;
     let mut preview_theme_mode: Option<ThemeMode> = None;
+    let mut preview_confirm_driver: Option<DriverId> = None;
+    let mut dry_run_install_driver: Option<DriverId> = None;
+    let mut log_path_override: Option<PathBuf> = None;
     let mut live_demo_pad = false;
     let mut tray_smoke_ms: Option<u64> = None;
     let mut show_editor_profile: Option<String> = None;
@@ -93,6 +110,25 @@ fn main() {
                     i += 1;
                 }
             }
+            "--preview-confirm-driver" => {
+                if i + 1 < args.len() {
+                    preview_confirm_driver = parse_driver_id_arg(&args[i + 1]);
+                    open_immediately = true;
+                    i += 1;
+                }
+            }
+            "--dry-run-install" => {
+                if i + 1 < args.len() {
+                    dry_run_install_driver = parse_driver_id_arg(&args[i + 1]);
+                    i += 1;
+                }
+            }
+            "--log-path" => {
+                if i + 1 < args.len() {
+                    log_path_override = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
             "--live-demo-pad" => live_demo_pad = true,
             "--tray-smoke-ms" => {
                 if i + 1 < args.len() {
@@ -117,6 +153,23 @@ fn main() {
         i += 1;
     }
 
+    let log_path = log_path_override.unwrap_or_else(AppLog::default_path);
+    if let Some(driver) = dry_run_install_driver {
+        let log = AppLog::new(log_path);
+        let spec = dry_run_installer_spec(driver, &log);
+        println!(
+            "driver={} publisher={} exe_path={} verb={} parameters=\"{}\" contains_silent_flags={} show_cmd={}",
+            driver.display_name(),
+            driver.publisher_short(),
+            spec.exe_path.display(),
+            spec.verb,
+            spec.parameters,
+            spec.contains_silent_flags(),
+            spec.show_cmd
+        );
+        return;
+    }
+
     if let Some(probe_out) = probe_profile_switch_json {
         if let Err(err) = run_profile_switch_probe(&probe_out) {
             eprintln!("profile switch probe failed: {err}");
@@ -126,7 +179,7 @@ fn main() {
     }
 
     let config_path = AppConfig::default_path();
-    let mut engine = match EngineHandle::start(config_path) {
+    let mut engine = match EngineHandle::start(config_path, log_path) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("z-controller startup failed: {err}");
@@ -192,10 +245,12 @@ fn main() {
         let (ws, priv_b) = query_process_memory_bytes();
         let report = SmokeReport {
             controllers: snap.controllers.clone(),
-            driver_vigem_installed: snap.driver_status.vigem_installed,
-            driver_hidhide_installed: snap.driver_status.hidhide_installed,
-            driver_hidhide_accessible: snap.driver_status.hidhide_accessible,
-            driver_hidhide_error: snap.driver_status.hidhide_error.clone(),
+            vigem_working: snap.driver_status.vigem_working(),
+            vigem_state: snap.driver_status.vigem.state.status_label(),
+            vigem_version: snap.driver_status.vigem.version.clone(),
+            hidhide_working: snap.driver_status.hidhide_working(),
+            hidhide_state: snap.driver_status.hidhide.state.status_label(),
+            hidhide_version: snap.driver_status.hidhide.version.clone(),
             working_set_bytes: ws,
             private_bytes: priv_b,
         };
@@ -207,10 +262,10 @@ fn main() {
         return;
     }
 
-    // First-run convenience: automatically show main window if drivers are missing so user
-    // can trigger the inline UAC driver bootstrap without any popup dialog.
+    // First-run convenience: show main window if required ViGEmBus is not working so the user sees its
+    // explicit status and per-driver consent actions; never auto-install any driver.
     let snap = engine.snapshot();
-    if !snap.driver_status.vigem_installed || !snap.driver_status.hidhide_installed {
+    if !snap.driver_status.vigem_working() {
         open_immediately = true;
     }
 
@@ -251,12 +306,15 @@ fn main() {
     };
 
     let preview_driver_status = if preview_missing_drivers {
-        Some(z_core::backend::DriverStatus {
-            vigem_installed: false,
-            hidhide_installed: false,
-            hidhide_accessible: false,
-            hidhide_error: None,
-            reboot_recommended: false,
+        Some(DriverStatus {
+            vigem: DriverEntryStatus::not_installed(DriverId::ViGEmBus),
+            hidhide: DriverEntryStatus {
+                id: DriverId::HidHide,
+                state: DriverState::InstalledNotRunning(NotRunningReason::ServiceStopped),
+                version: Some("1.5.230".to_string()),
+                pnp_instance_id: Some("ROOT\\SYSTEM\\0004".to_string()),
+                detail_note: Some("HidHide service is currently stopped.".to_string()),
+            },
         })
     } else {
         None
@@ -269,6 +327,7 @@ fn main() {
         preview,
         preview_driver_status,
         preview_theme_mode,
+        preview_confirm_driver,
         tray_smoke_ms,
         test_dpi,
     ) {
@@ -450,7 +509,7 @@ fn run_profile_switch_probe(out_path: &std::path::Path) -> Result<(), String> {
     cfg.profiles.push(probe_swap);
     cfg.save_atomic(&cfg_path).map_err(|e| e.to_string())?;
 
-    let mut engine = EngineHandle::start(cfg_path.clone())?;
+    let mut engine = EngineHandle::start(cfg_path.clone(), AppLog::default_path())?;
     let vp = SdlVirtualGamepad::attach(0x045E, 0x028E, "ZCtrl Probe Pad")
         .map_err(|e| format!("virtual pad attach failed: {e}"))?;
 

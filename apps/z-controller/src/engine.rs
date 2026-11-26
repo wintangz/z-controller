@@ -12,6 +12,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
 
 use z_core::backend::{DriverStatus, OutputBackend, SlotCoordinator};
 use z_core::battery::{BatteryReading, BatteryStatus, reconcile_battery};
+use z_core::driver::DriverId;
 use z_core::mapping::map_physical_to_virtual;
 use z_core::model::{
     ControllerFamily, DisconnectPolicy, HardwareKey, LogicalButton, PhysicalGamepadState,
@@ -19,7 +20,7 @@ use z_core::model::{
 };
 use z_core::profile::{AppConfig, Profile, ThemeMode};
 use z_platform_windows::backend_impl::WindowsOutputBackend;
-use z_platform_windows::drivers::{self, DriverInstallOutcome};
+use z_platform_windows::drivers::{self, AppLog, RemedyKind};
 use z_platform_windows::hidhide;
 use z_platform_windows::pnp::{interface_path_to_instance_id, is_vigem_virtual_device_path};
 use z_platform_windows::raw_battery::{read_switch_hid_battery, read_xinput_battery};
@@ -134,10 +135,12 @@ pub struct EngineSnapshot {
     pub controllers: Vec<ControllerSnapshot>,
     pub config: AppConfig,
     pub driver_status: DriverStatus,
+    pub driver_messages: BTreeMap<DriverId, String>,
+    pub busy_driver: Option<DriverId>,
     pub last_status_message: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EngineCommand {
     SelectDeviceProfile {
         key: HardwareKey,
@@ -154,7 +157,21 @@ pub enum EngineCommand {
     SetThemeMode(ThemeMode),
     UpsertProfile(Profile),
     DeleteProfile(String),
-    InstallDrivers,
+    CancelInstallDriver(DriverId),
+    ConfirmInstallDriver(DriverId),
+    RunDriverRemedy(DriverId),
+    ConfirmSystemReboot(DriverId),
+    LocateDriverFolder {
+        driver: DriverId,
+        folder: PathBuf,
+    },
+    ClearDriverLocation(DriverId),
+    #[doc(hidden)]
+    InternalDriverTaskDone {
+        driver: DriverId,
+        reboot_pending: bool,
+        message: String,
+    },
     RefreshStatus,
     Shutdown,
 }
@@ -171,7 +188,7 @@ pub struct EngineHandle {
 }
 
 impl EngineHandle {
-    pub fn start(config_path: PathBuf) -> Result<Self, String> {
+    pub fn start(config_path: PathBuf, log_path: PathBuf) -> Result<Self, String> {
         let sdl = SdlContext::init().map_err(|e| format!("SDL3 init failed: {e}"))?;
         let waker = sdl.waker();
         let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -187,6 +204,7 @@ impl EngineHandle {
         let ed_vis_clone = Arc::clone(&editor_visible);
         let ed_hwnd_clone = Arc::clone(&editor_hwnd);
         let waker_clone = waker.clone();
+        let worker_tx = cmd_tx.clone();
 
         let (ready_tx, ready_rx) = mpsc::channel();
         let join = thread::Builder::new()
@@ -196,6 +214,8 @@ impl EngineHandle {
                     sdl,
                     waker_clone,
                     config_path,
+                    log_path,
+                    worker_tx,
                     cmd_rx,
                     snap_clone,
                     vis_clone,
@@ -437,6 +457,8 @@ fn run_engine_loop(
     sdl: SdlContext,
     waker: SdlEventWaker,
     config_path: PathBuf,
+    log_path: PathBuf,
+    worker_tx: Sender<EngineCommand>,
     cmd_rx: Receiver<EngineCommand>,
     snapshot_out: Arc<Mutex<Arc<EngineSnapshot>>>,
     window_visible: Arc<AtomicBool>,
@@ -445,6 +467,7 @@ fn run_engine_loop(
     editor_hwnd: Arc<Mutex<usize>>,
     ready_tx: Sender<()>,
 ) {
+    let app_log = AppLog::new(log_path);
     let mut config = AppConfig::load_or_default(&config_path);
     let mut backend = WindowsOutputBackend::new();
     let mut coord = SlotCoordinator::new();
@@ -452,6 +475,8 @@ fn run_engine_loop(
     let mut cloaked_ids: BTreeSet<String> = BTreeSet::new();
     let mut disconnected_meta: BTreeMap<String, (String, ControllerFamily, Transport, BatteryReading)> =
         BTreeMap::new();
+    let mut driver_messages: BTreeMap<DriverId, String> = BTreeMap::new();
+    let mut busy_driver: Option<DriverId> = None;
     let mut last_status_message: Option<String> = None;
 
     // Initial enumeration
@@ -504,6 +529,8 @@ fn run_engine_loop(
         &backend,
         &cloaked_ids,
         &disconnected_meta,
+        &driver_messages,
+        busy_driver,
         &last_status_message,
         &snapshot_out,
         &window_visible,
@@ -515,8 +542,6 @@ fn run_engine_loop(
 
     let mut running = true;
     while running {
-        // Wait purely event-driven (zero busy polling!) unless a newly opened wireless pad is still waiting
-        // up to 500ms for its first battery reading.
         let needs_initial_batt = pads
             .values()
             .any(|p| p.battery.percent.is_none() && p.opened_at.elapsed().as_millis() < 600);
@@ -551,18 +576,21 @@ fn run_engine_loop(
                                     handle_ui_command(
                                         other,
                                         &config_path,
+                                        &app_log,
+                                        &worker_tx,
                                         &mut config,
                                         &mut pads,
                                         &mut backend,
                                         &mut coord,
                                         &waker,
+                                        &mut driver_messages,
+                                        &mut busy_driver,
                                         &mut last_status_message,
                                     );
                                     dirty = true;
                                 }
                             }
                         }
-                        // Drain any pending rumble feedback notifications
                         for pad in pads.values() {
                             if let Some(cmd) = coord.drain_rumble(&pad.key) {
                                 let (_, profile) = config.profile_for_device(&pad.key);
@@ -625,6 +653,8 @@ fn run_engine_loop(
                 &backend,
                 &cloaked_ids,
                 &disconnected_meta,
+                &driver_messages,
+                busy_driver,
                 &last_status_message,
                 &snapshot_out,
                 &window_visible,
@@ -635,7 +665,6 @@ fn run_engine_loop(
         }
     }
 
-    // Guaranteed clean teardown
     let _ = backend.uncloak_all();
     drop(coord);
 }
@@ -658,11 +687,9 @@ fn try_open_pad(
         return false;
     };
     let path = gp.path();
-    // Anti-loop Layer 1: never capture ViGEm virtual Xbox 360 or DS4 pads identified by PnP parent tree.
     if is_vigem_virtual_device_path(path.as_deref()) {
         return false;
     }
-    // Anti-loop Layer 2: SDL3 XInput devices may omit `path` (`None`); match against active ViGEm X360 slots.
     if !gp.is_virtual() && path.is_none() {
         if let Some(pidx) = gp.player_index() {
             if coord.owns_xinput_user_index(pidx) {
@@ -696,8 +723,9 @@ fn try_open_pad(
     let state = snapshot_physical_state(&gp);
     let battery = read_sdl_battery(&gp, family, path.as_deref());
 
+    // Never auto-install any driver if ViGEmBus is absent/not running; only spawn virtual pad if working.
     let (enabled, profile) = config.profile_for_device(&key);
-    if enabled {
+    if enabled && backend.driver_status().vigem_working() {
         let wake_waker = waker.clone();
         if let Err(e) = coord.ensure_pad(
             &key,
@@ -870,11 +898,15 @@ fn handle_sdl_event(
 fn handle_ui_command(
     cmd: EngineCommand,
     config_path: &PathBuf,
+    app_log: &AppLog,
+    worker_tx: &Sender<EngineCommand>,
     config: &mut AppConfig,
     pads: &mut BTreeMap<SdlJoystickId, OpenPad>,
     backend: &mut WindowsOutputBackend,
     coord: &mut SlotCoordinator,
     waker: &SdlEventWaker,
+    driver_messages: &mut BTreeMap<DriverId, String>,
+    busy_driver: &mut Option<DriverId>,
     last_status_message: &mut Option<String>,
 ) {
     match cmd {
@@ -885,6 +917,17 @@ fn handle_ui_command(
             reconcile_slots(pads, config, backend, coord, waker, last_status_message);
         }
         EngineCommand::SetDeviceEnabled { key, enabled } => {
+            if enabled && !backend.driver_status().vigem_working() {
+                // Requirement 1 & 8: virtual-pad toggle NEVER triggers driver install; keep OFF when ViGEmBus is not working.
+                let pid = config.profile_for_device(&key).1.id.clone();
+                config.set_device_binding(&key, pid, false);
+                let _ = config.save_atomic(config_path);
+                *last_status_message = Some(
+                    "Virtual pad needs ViGEmBus — install or start ViGEmBus under Drivers."
+                        .to_string(),
+                );
+                return;
+            }
             let pid = config.profile_for_device(&key).1.id.clone();
             config.set_device_binding(&key, pid, enabled);
             let _ = config.save_atomic(config_path);
@@ -894,7 +937,6 @@ fn handle_ui_command(
             key,
             show_live_input,
         } => {
-            // Purely visual UI preference: persist without touching SDL pads or virtual output slots.
             config.set_device_show_live_input(&key, show_live_input);
             let _ = config.save_atomic(config_path);
         }
@@ -926,22 +968,141 @@ fn handle_ui_command(
                 reconcile_slots(pads, config, backend, coord, waker, last_status_message);
             }
         }
-        EngineCommand::InstallDrivers => match drivers::install_missing_drivers() {
-            Ok(DriverInstallOutcome {
-                reboot_recommended,
-                message,
-                ..
-            }) => {
-                if reboot_recommended {
-                    backend.reboot_recommended = true;
+        EngineCommand::CancelInstallDriver(driver) => {
+            // Requirement 3: cancelling launches nothing and logs nothing beyond the cancellation.
+            app_log.append(
+                "INFO",
+                &format!(
+                    "Install cancelled in confirmation dialog: driver={} publisher={}",
+                    driver.display_name(),
+                    driver.publisher_short()
+                ),
+            );
+        }
+        EngineCommand::ConfirmInstallDriver(driver) => {
+            if busy_driver.is_some() {
+                return;
+            }
+            *busy_driver = Some(driver);
+            driver_messages.insert(
+                driver,
+                format!("Installer wizard open for {}...", driver.display_name()),
+            );
+            let already_reboot = backend.reboot_pending_drivers.contains(&driver);
+            let log_clone = app_log.clone();
+            let tx_clone = worker_tx.clone();
+            let waker_clone = waker.clone();
+            thread::Builder::new()
+                .name(format!("z-ctrl-inst-{}", driver.service_name()))
+                .spawn(move || {
+                    let (report, reboot_pending) =
+                        drivers::run_driver_installer_wizard(driver, already_reboot, &log_clone);
+                    let _ = tx_clone.send(EngineCommand::InternalDriverTaskDone {
+                        driver,
+                        reboot_pending,
+                        message: report.summary(driver),
+                    });
+                    waker_clone.wake(1);
+                })
+                .ok();
+        }
+        EngineCommand::RunDriverRemedy(driver) => {
+            if busy_driver.is_some() {
+                return;
+            }
+            let reboot_flag = backend.reboot_pending_drivers.contains(&driver);
+            let entry = drivers::detect_single_driver(driver, reboot_flag);
+            let Some(remedy) = drivers::remedy_for_entry(&entry) else {
+                driver_messages.insert(
+                    driver,
+                    entry
+                        .detail_note
+                        .unwrap_or_else(|| "Re-checked status.".to_string()),
+                );
+                return;
+            };
+            if remedy.requires_reboot_confirm() {
+                return;
+            }
+            *busy_driver = Some(driver);
+            driver_messages.insert(driver, format!("Running remedy: {}...", remedy.button_label()));
+            let log_clone = app_log.clone();
+            let tx_clone = worker_tx.clone();
+            let waker_clone = waker.clone();
+            thread::Builder::new()
+                .name(format!("z-ctrl-remedy-{}", driver.service_name()))
+                .spawn(move || {
+                    let message = match drivers::run_driver_remedy(driver, &remedy, &log_clone) {
+                        Ok(msg) => msg,
+                        Err(err) => err,
+                    };
+                    let _ = tx_clone.send(EngineCommand::InternalDriverTaskDone {
+                        driver,
+                        reboot_pending: false,
+                        message,
+                    });
+                    waker_clone.wake(1);
+                })
+                .ok();
+        }
+        EngineCommand::ConfirmSystemReboot(driver) => {
+            app_log.append(
+                "INFO",
+                &format!(
+                    "User confirmed system reboot for {} driver setup.",
+                    driver.display_name()
+                ),
+            );
+            match drivers::run_driver_remedy(driver, &RemedyKind::RestartMachine, app_log) {
+                Ok(msg) => {
+                    driver_messages.insert(driver, msg.clone());
+                    *last_status_message = Some(msg);
                 }
-                *last_status_message = Some(message);
-                reconcile_slots(pads, config, backend, coord, waker, last_status_message);
+                Err(err) => {
+                    driver_messages.insert(driver, err.clone());
+                    *last_status_message = Some(err);
+                }
             }
-            Err(e) => {
-                *last_status_message = Some(format!("Driver install error: {e}"));
+        }
+        EngineCommand::LocateDriverFolder { driver, folder } => {
+            let reboot_flag = backend.reboot_pending_drivers.contains(&driver);
+            let outcome = drivers::locate_and_verify_driver_folder(
+                driver,
+                &folder,
+                reboot_flag,
+                app_log,
+            );
+            if outcome.is_accepted() {
+                config.set_located_dir(driver, Some(folder.display().to_string()));
+                let _ = config.save_atomic(config_path);
             }
-        },
+            let msg = outcome.summary_message();
+            driver_messages.insert(driver, msg.clone());
+            *last_status_message = Some(msg);
+            reconcile_slots(pads, config, backend, coord, waker, last_status_message);
+        }
+        EngineCommand::ClearDriverLocation(driver) => {
+            config.set_located_dir(driver, None);
+            let _ = config.save_atomic(config_path);
+            let msg = format!("{}: cleared custom located folder.", driver.display_name());
+            app_log.append("INFO", &msg);
+            driver_messages.insert(driver, msg);
+        }
+        EngineCommand::InternalDriverTaskDone {
+            driver,
+            reboot_pending,
+            message,
+        } => {
+            *busy_driver = None;
+            if reboot_pending {
+                backend.reboot_pending_drivers.insert(driver);
+            } else {
+                backend.reboot_pending_drivers.remove(&driver);
+            }
+            driver_messages.insert(driver, message.clone());
+            *last_status_message = Some(message);
+            reconcile_slots(pads, config, backend, coord, waker, last_status_message);
+        }
         EngineCommand::RefreshStatus => {
             reconcile_slots(pads, config, backend, coord, waker, last_status_message);
         }
@@ -957,9 +1118,10 @@ fn reconcile_slots(
     waker: &SdlEventWaker,
     last_status_message: &mut Option<String>,
 ) {
+    let vigem_ok = backend.driver_status().vigem_working();
     for pad in pads.values() {
         let (enabled, profile) = config.profile_for_device(&pad.key);
-        if enabled {
+        if enabled && vigem_ok {
             let wake_waker = waker.clone();
             if let Err(e) = coord.ensure_pad(
                 &pad.key,
@@ -986,6 +1148,11 @@ fn sync_cloaks(
     cloaked_ids: &mut BTreeSet<String>,
     last_status_message: &mut Option<String>,
 ) {
+    if !backend.driver_status().hidhide_working() {
+        // Requirement 8: when HidHide is not working, only cloaking is unavailable; mapping & virtual pads continue.
+        cloaked_ids.clear();
+        return;
+    }
     let mut desired = BTreeSet::new();
     for pad in pads.values() {
         let (enabled, profile) = config.profile_for_device(&pad.key);
@@ -1013,6 +1180,8 @@ fn publish_snapshot(
     backend: &WindowsOutputBackend,
     cloaked_ids: &BTreeSet<String>,
     disconnected_meta: &BTreeMap<String, (String, ControllerFamily, Transport, BatteryReading)>,
+    driver_messages: &BTreeMap<DriverId, String>,
+    busy_driver: Option<DriverId>,
     last_status_message: &Option<String>,
     snapshot_out: &Arc<Mutex<Arc<EngineSnapshot>>>,
     window_visible: &Arc<AtomicBool>,
@@ -1064,7 +1233,6 @@ fn publish_snapshot(
         if seen_ids.contains(canonical) {
             continue;
         }
-        // Only display KeepNeutral disconnected virtual pads that are still alive on ViGEmBus
         if let Some(binding_key) = parse_canonical_key(canonical) {
             if let Some(slot) = coord.get(&binding_key) {
                 let (enabled, profile) = config.profile_for_device(&binding_key);
@@ -1104,6 +1272,8 @@ fn publish_snapshot(
         controllers,
         config: config.clone(),
         driver_status: backend.driver_status(),
+        driver_messages: driver_messages.clone(),
+        busy_driver,
         last_status_message: last_status_message.clone(),
     });
     *snapshot_out.lock().unwrap_or_else(|e| e.into_inner()) = snap;

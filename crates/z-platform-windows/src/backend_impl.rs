@@ -1,9 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::mpsc::{self, Receiver};
 
 use z_core::backend::{
     BackendCapabilities, BackendError, DriverStatus, OutputBackend, VirtualPadHandle,
 };
+use z_core::driver::DriverId;
 use z_core::model::{RumbleCommand, VirtualOutputReport, VirtualTargetKind};
 
 use crate::drivers;
@@ -68,7 +69,7 @@ impl VirtualPadHandle for WindowsVirtualPad {
 pub struct WindowsOutputBackend {
     vigem: Option<VigemClient>,
     last_cloaked: BTreeSet<String>,
-    pub reboot_recommended: bool,
+    pub reboot_pending_drivers: HashSet<DriverId>,
 }
 
 impl WindowsOutputBackend {
@@ -78,7 +79,7 @@ impl WindowsOutputBackend {
         Self {
             vigem,
             last_cloaked: BTreeSet::new(),
-            reboot_recommended: false,
+            reboot_pending_drivers: HashSet::new(),
         }
     }
 
@@ -115,7 +116,10 @@ impl OutputBackend for WindowsOutputBackend {
     }
 
     fn driver_status(&self) -> DriverStatus {
-        drivers::detect_driver_status(self.reboot_recommended)
+        drivers::detect_driver_status(
+            self.reboot_pending_drivers.contains(&DriverId::ViGEmBus),
+            self.reboot_pending_drivers.contains(&DriverId::HidHide),
+        )
     }
 
     fn spawn_virtual_pad(

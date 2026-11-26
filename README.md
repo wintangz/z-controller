@@ -18,7 +18,7 @@ A lightweight Windows system-tray utility that reads all connected controllers, 
 ## Install & Quick-Start
 
 1. Download `z-controller.exe` from [GitHub Releases](https://github.com/wintangz/z-controller/releases) and run it (single portable executable).
-2. **Driver setup**: `ViGEmBus` and `HidHide` installers are bundled inside `z-controller.exe` and offered directly from the status bar on first run if either driver is missing (**HidHide requires a reboot** after installation to finish loading its driver).
+2. **Driver setup**: `ViGEmBus` (required for virtual Xbox 360 / DualShock 4 pads) and `HidHide` (optional, for hiding physical pads from games) installers are bundled inside `z-controller.exe`. The app never installs drivers automatically — click each driver's **Install** button under **Drivers**, confirm the dialog, and step through the official installer wizard yourself (**HidHide** may require a reboot to finish loading). You can also use **I already have this — Locate…** to verify an existing Nefarius installation folder.
 3. **Quick-start**: Connect pad → enable **Active** on its card → pick output / profile → play.
 
 ## Known Limitations

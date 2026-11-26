@@ -7,9 +7,10 @@ use egui::{
     Rounding, Stroke, TextStyle, Vec2,
 };
 use z_core::battery::BatteryStatus;
+use z_core::driver::{DriverEntryStatus, DriverId, DriverState};
 use z_core::model::{ControllerFamily, DisconnectPolicy, LogicalButton, VirtualTargetKind};
 use z_core::profile::{Profile, ThemeMode};
-use z_platform_windows::drivers::query_process_memory_bytes;
+use z_platform_windows::drivers::{query_process_memory_bytes, remedy_for_entry};
 
 use crate::diagram::draw_controller_diagram;
 use crate::engine::{
@@ -124,6 +125,9 @@ pub enum UiAction {
         controller_id: String,
         profile_id: String,
     },
+    BrowseDriverFolder {
+        driver: DriverId,
+    },
 }
 
 pub struct AppUiState {
@@ -132,6 +136,9 @@ pub struct AppUiState {
     pub draft_profile: Option<Profile>,
     pub draft_dirty: bool,
     pub selected_diagram_button: Option<LogicalButton>,
+    pub pending_install_confirm: Option<DriverId>,
+    pub pending_reboot_confirm: Option<DriverId>,
+    pub missing_vigem_notice_controller: Option<String>,
     pub last_dynamic_rect_main: Option<Rect>,
     pub last_dynamic_rect_editor: Option<Rect>,
     pub desired_compact_logical_h: Option<f32>,
@@ -146,6 +153,9 @@ impl Default for AppUiState {
             draft_profile: None,
             draft_dirty: false,
             selected_diagram_button: Some(LogicalButton::South),
+            pending_install_confirm: None,
+            pending_reboot_confirm: None,
+            missing_vigem_notice_controller: None,
             last_dynamic_rect_main: None,
             last_dynamic_rect_editor: None,
             desired_compact_logical_h: None,
@@ -166,6 +176,9 @@ pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
     ui.editing_profile_id.hash(&mut h);
     ui.draft_dirty.hash(&mut h);
     ui.selected_diagram_button.hash(&mut h);
+    ui.pending_install_confirm.hash(&mut h);
+    ui.pending_reboot_confirm.hash(&mut h);
+    ui.missing_vigem_notice_controller.hash(&mut h);
 
     if let Some(p) = &ui.draft_profile {
         p.id.hash(&mut h);
@@ -184,12 +197,19 @@ pub fn static_ui_hash(snap: &EngineSnapshot, ui: &AppUiState) -> u64 {
         }
     }
 
-    snap.driver_status.vigem_installed.hash(&mut h);
-    snap.driver_status.hidhide_installed.hash(&mut h);
-    snap.driver_status.hidhide_accessible.hash(&mut h);
-    snap.driver_status.reboot_recommended.hash(&mut h);
+    for entry in [&snap.driver_status.vigem, &snap.driver_status.hidhide] {
+        entry.id.hash(&mut h);
+        entry.state.hash(&mut h);
+        entry.version.hash(&mut h);
+        entry.pnp_instance_id.hash(&mut h);
+        entry.detail_note.hash(&mut h);
+    }
+    snap.busy_driver.hash(&mut h);
+    snap.driver_messages.hash(&mut h);
     snap.last_status_message.hash(&mut h);
     (snap.config.theme_mode as u8).hash(&mut h);
+    snap.config.vigem_located_dir.hash(&mut h);
+    snap.config.hidhide_located_dir.hash(&mut h);
     snap.config.default_profile_id.hash(&mut h);
     snap.config.profiles.len().hash(&mut h);
 
@@ -580,14 +600,9 @@ pub fn draw_compact_main_snapshot(
     let pal = ThemePalette::for_mode(mode);
 
     state.last_dynamic_rect_main = None;
-    let ds = &snap.driver_status;
-    let has_driver_alert = !ds.vigem_installed
-        || !ds.hidhide_installed
-        || ds.reboot_recommended
-        || ds.hidhide_error.is_some();
-    let status_bar_h = if has_driver_alert { 68.0_f32 } else { 36.0_f32 };
+    let status_bar_h = 34.0_f32;
 
-    // Bottom status bar (driver readiness, HidHide lock warnings, live RAM readout — NO popups)
+    // Bottom status bar (compact driver readiness summary + live RAM readout — NO install buttons)
     egui::TopBottomPanel::bottom("compact_status_bar")
         .exact_height(status_bar_h)
         .frame(
@@ -602,7 +617,7 @@ pub fn draw_compact_main_snapshot(
                 [Pos2::new(sr.left(), top_y), Pos2::new(sr.right(), top_y)],
                 Stroke::new(1.0_f32, pal.border),
             );
-            draw_status_bar(ui, snap, has_driver_alert, &pal, &mut send);
+            ui.horizontal_centered(|ui| draw_status_bar_row(ui, snap, &pal));
         });
 
     egui::CentralPanel::default()
@@ -643,29 +658,6 @@ pub fn draw_compact_main_snapshot(
                 },
             );
 
-            if snap.controllers.is_empty() {
-                let empty_resp = egui::Frame::none()
-                    .fill(pal.panel)
-                    .rounding(CARD_ROUNDING)
-                    .stroke(Stroke::new(1.0_f32, pal.border))
-                    .inner_margin(Margin::same(SPACE_MD))
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = SPACE_XS;
-                        ui.label(
-                            RichText::new("No physical controllers detected.").color(pal.text),
-                        );
-                        ui.label(
-                            RichText::new("Connect a controller via Bluetooth or USB.")
-                                .small()
-                                .color(pal.muted),
-                        );
-                    });
-                state.desired_compact_logical_h =
-                    Some((empty_resp.response.rect.bottom() + SPACE_MD + status_bar_h).ceil());
-                return;
-            }
-
             let mut content_bottom_y: Option<f32> = None;
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
@@ -675,270 +667,394 @@ pub fn draw_compact_main_snapshot(
                         let avail_col = ui.available_width();
                         ui.set_max_width(avail_col);
                         let card_inner_w = (avail_col - SPACE_MD * 2.0).max(200.0);
-                        let total_cards = snap.controllers.len();
-                        for (idx, ctrl) in snap.controllers.iter().enumerate() {
-                            let is_selected =
-                                state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
-                            let card_fill = if is_selected {
-                                pal.widget
-                            } else {
-                                pal.panel
-                            };
-                            let card_bg_slot = if ctrl.virtual_active {
-                                Some(ui.painter().add(egui::Shape::Noop))
-                            } else {
-                                None
-                            };
-                            let card_stroke = if ctrl.virtual_active {
-                                Stroke::NONE
-                            } else {
-                                Stroke::new(
-                                    1.0_f32,
-                                    if is_selected { pal.accent_line } else { pal.border },
-                                )
-                            };
-                            let frame_fill = if ctrl.virtual_active {
-                                Color32::TRANSPARENT
-                            } else {
-                                card_fill
-                            };
 
-                            let card_resp = egui::Frame::none()
-                                .fill(frame_fill)
+                        if snap.controllers.is_empty() {
+                            egui::Frame::none()
+                                .fill(pal.panel)
                                 .rounding(CARD_ROUNDING)
+                                .stroke(Stroke::new(1.0_f32, pal.border))
                                 .inner_margin(Margin::same(SPACE_MD))
-                                .stroke(card_stroke)
                                 .show(ui, |ui| {
                                     ui.set_width(card_inner_w);
-                                    ui.spacing_mut().item_spacing = Vec2::new(SPACE_SM, SPACE_XS);
-
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                        let dot = if ctrl.connected {
-                                            STATUS_GREEN
-                                        } else {
-                                            STATUS_RED
-                                        };
-                                        draw_status_dot(ui, dot);
-                                        let title_resp = ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&ctrl.name)
-                                                    .strong()
-                                                    .color(pal.text),
-                                            )
-                                            .truncate()
-                                            .sense(egui::Sense::click()),
-                                        );
-                                        if title_resp.clicked() {
-                                            state.selected_controller =
-                                                Some(ctrl.canonical_id.clone());
-                                        }
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if draw_collapse_chevron_button(
-                                                    ui,
-                                                    ctrl.show_live_input,
-                                                    &pal,
-                                                ) {
-                                                    send(EngineCommand::SetDeviceShowLiveInput {
-                                                        key: ctrl.key.clone(),
-                                                        show_live_input: !ctrl.show_live_input,
-                                                    });
-                                                }
-                                            },
-                                        );
-                                    });
-
+                                    ui.spacing_mut().item_spacing.y = SPACE_XS;
                                     ui.label(
-                                        RichText::new(format!(
-                                            "{} | {} | {:04X}:{:04X}",
-                                            ctrl.family.label(),
-                                            ctrl.transport.label(),
-                                            ctrl.key.vid,
-                                            ctrl.key.pid
-                                        ))
-                                        .small()
-                                        .color(pal.muted),
+                                        RichText::new("No physical controllers detected.")
+                                            .color(pal.text),
                                     );
+                                    ui.label(
+                                        RichText::new("Connect a controller via Bluetooth or USB.")
+                                            .small()
+                                            .color(pal.muted),
+                                    );
+                                });
+                        } else {
+                            let total_cards = snap.controllers.len();
+                            for (idx, ctrl) in snap.controllers.iter().enumerate() {
+                                let is_selected =
+                                    state.selected_controller.as_deref() == Some(&ctrl.canonical_id);
+                                let card_fill = if is_selected {
+                                    pal.widget
+                                } else {
+                                    pal.panel
+                                };
+                                let card_bg_slot = if ctrl.virtual_active {
+                                    Some(ui.painter().add(egui::Shape::Noop))
+                                } else {
+                                    None
+                                };
+                                let card_stroke = if ctrl.virtual_active {
+                                    Stroke::NONE
+                                } else {
+                                    Stroke::new(
+                                        1.0_f32,
+                                        if is_selected { pal.accent_line } else { pal.border },
+                                    )
+                                };
+                                let frame_fill = if ctrl.virtual_active {
+                                    Color32::TRANSPARENT
+                                } else {
+                                    card_fill
+                                };
 
-                                    draw_battery_bar(ui, &ctrl.battery, &pal);
+                                let card_resp = egui::Frame::none()
+                                    .fill(frame_fill)
+                                    .rounding(CARD_ROUNDING)
+                                    .inner_margin(Margin::same(SPACE_MD))
+                                    .stroke(card_stroke)
+                                    .show(ui, |ui| {
+                                        ui.set_width(card_inner_w);
+                                        ui.spacing_mut().item_spacing =
+                                            Vec2::new(SPACE_SM, SPACE_XS);
 
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                        draw_status_dot(
-                                            ui,
-                                            if ctrl.enabled {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            let dot = if ctrl.connected {
                                                 STATUS_GREEN
                                             } else {
                                                 STATUS_RED
-                                            },
+                                            };
+                                            draw_status_dot(ui, dot);
+                                            let title_resp = ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(&ctrl.name)
+                                                        .strong()
+                                                        .color(pal.text),
+                                                )
+                                                .truncate()
+                                                .sense(egui::Sense::click()),
+                                            );
+                                            if title_resp.clicked() {
+                                                state.selected_controller =
+                                                    Some(ctrl.canonical_id.clone());
+                                            }
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if draw_collapse_chevron_button(
+                                                        ui,
+                                                        ctrl.show_live_input,
+                                                        &pal,
+                                                    ) {
+                                                        send(EngineCommand::SetDeviceShowLiveInput {
+                                                            key: ctrl.key.clone(),
+                                                            show_live_input: !ctrl.show_live_input,
+                                                        });
+                                                    }
+                                                },
+                                            );
+                                        });
+
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} | {} | {:04X}:{:04X}",
+                                                ctrl.family.label(),
+                                                ctrl.transport.label(),
+                                                ctrl.key.vid,
+                                                ctrl.key.pid
+                                            ))
+                                            .small()
+                                            .color(pal.muted),
                                         );
-                                        let mut enabled = ctrl.enabled;
-                                        if ui.checkbox(&mut enabled, "Active").changed() {
-                                            send(EngineCommand::SetDeviceEnabled {
-                                                key: ctrl.key.clone(),
-                                                enabled,
-                                            });
-                                        }
-                                        if ctrl.virtual_active {
+
+                                        draw_battery_bar(ui, &ctrl.battery, &pal);
+
+                                        let vigem_ok = snap.driver_status.vigem_working();
+                                        let hidhide_ok = snap.driver_status.hidhide_working();
+
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            draw_status_dot(
+                                                ui,
+                                                if ctrl.enabled && vigem_ok {
+                                                    STATUS_GREEN
+                                                } else {
+                                                    STATUS_RED
+                                                },
+                                            );
+                                            let mut enabled = ctrl.enabled;
+                                            if ui.checkbox(&mut enabled, "Active").changed() {
+                                                if enabled && !vigem_ok {
+                                                    // Requirement 8: explain and offer ViGEmBus install flow; never toggle on or auto-install.
+                                                    state.missing_vigem_notice_controller =
+                                                        Some(ctrl.canonical_id.clone());
+                                                } else {
+                                                    state.missing_vigem_notice_controller = None;
+                                                    send(EngineCommand::SetDeviceEnabled {
+                                                        key: ctrl.key.clone(),
+                                                        enabled,
+                                                    });
+                                                }
+                                            }
+                                            if ctrl.virtual_active {
+                                                egui::Frame::none()
+                                                    .fill(pal.pill_blue_fill)
+                                                    .rounding(Rounding::same(4.0))
+                                                    .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                                                    .inner_margin(Margin::symmetric(SPACE_SM, 0.0))
+                                                    .show(ui, |ui| {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "-> {}",
+                                                                ctrl.target_kind.label()
+                                                            ))
+                                                            .small()
+                                                            .color(pal.text),
+                                                        );
+                                                    });
+                                            }
+                                            if hidhide_ok {
+                                                let cloak_dot = if ctrl.cloaked {
+                                                    STATUS_GREEN
+                                                } else {
+                                                    STATUS_RED
+                                                };
+                                                draw_status_dot(ui, cloak_dot);
+                                                ui.label(
+                                                    RichText::new(if ctrl.cloaked {
+                                                        "Cloaked"
+                                                    } else {
+                                                        "Visible"
+                                                    })
+                                                    .small()
+                                                    .color(if ctrl.cloaked {
+                                                        pal.text
+                                                    } else {
+                                                        pal.muted
+                                                    }),
+                                                );
+                                            } else {
+                                                draw_status_dot(ui, STATUS_RED);
+                                                ui.label(
+                                                    RichText::new("Cloak off (no HidHide)")
+                                                        .small()
+                                                        .color(pal.muted),
+                                                );
+                                            }
+                                        });
+
+                                        if state.missing_vigem_notice_controller.as_deref()
+                                            == Some(&ctrl.canonical_id)
+                                            && !vigem_ok
+                                        {
                                             egui::Frame::none()
-                                                .fill(pal.pill_blue_fill)
-                                                .rounding(Rounding::same(4.0))
-                                                .stroke(Stroke::new(1.0_f32, pal.accent_line))
-                                                .inner_margin(Margin::symmetric(SPACE_SM, 0.0))
+                                                .fill(pal.pill_pink_fill)
+                                                .rounding(Rounding::same(6.0))
+                                                .stroke(Stroke::new(1.0_f32, STATUS_RED))
+                                                .inner_margin(Margin::same(SPACE_SM))
                                                 .show(ui, |ui| {
+                                                    ui.spacing_mut().item_spacing.y = SPACE_XS;
                                                     ui.label(
                                                         RichText::new(format!(
-                                                            "-> {}",
-                                                            ctrl.target_kind.label()
+                                                            "Virtual pad needs ViGEmBus ({}).",
+                                                            snap.driver_status
+                                                                .vigem
+                                                                .state
+                                                                .status_label()
                                                         ))
                                                         .small()
                                                         .color(pal.text),
                                                     );
+                                                    ui.horizontal(|ui| {
+                                                        if let Some(rem) =
+                                                            remedy_for_entry(&snap.driver_status.vigem)
+                                                        {
+                                                            if ui
+                                                                .small_button(rem.button_label())
+                                                                .clicked()
+                                                            {
+                                                                if rem.requires_reboot_confirm() {
+                                                                    state.pending_reboot_confirm =
+                                                                        Some(DriverId::ViGEmBus);
+                                                                } else {
+                                                                    send(
+                                                                        EngineCommand::RunDriverRemedy(
+                                                                            DriverId::ViGEmBus,
+                                                                        ),
+                                                                    );
+                                                                }
+                                                            }
+                                                        } else if ui
+                                                            .small_button("Install ViGEmBus…")
+                                                            .clicked()
+                                                        {
+                                                            state.pending_install_confirm =
+                                                                Some(DriverId::ViGEmBus);
+                                                        }
+                                                        if ui.small_button("Dismiss").clicked() {
+                                                            state.missing_vigem_notice_controller =
+                                                                None;
+                                                        }
+                                                    });
                                                 });
                                         }
-                                        let cloak_dot = if ctrl.cloaked {
-                                            STATUS_GREEN
-                                        } else {
-                                            STATUS_RED
-                                        };
-                                        draw_status_dot(ui, cloak_dot);
-                                        ui.label(
-                                            RichText::new(if ctrl.cloaked {
-                                                "Cloaked"
-                                            } else {
-                                                "Visible"
-                                            })
-                                            .small()
-                                            .color(if ctrl.cloaked {
-                                                pal.text
-                                            } else {
-                                                pal.muted
-                                            }),
-                                        );
-                                    });
 
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = SPACE_SM;
-                                        ui.spacing_mut().button_padding =
-                                            Vec2::new(SPACE_SM, SPACE_XS);
-                                        ui.label(
-                                            RichText::new("Profile:").small().color(pal.muted),
-                                        );
-                                        let edit_text_w = ui.fonts(|f| {
-                                            f.layout_no_wrap(
-                                                "Edit Profile".to_owned(),
-                                                TextStyle::Small.resolve(ui.style()),
-                                                pal.text,
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                                            ui.spacing_mut().button_padding =
+                                                Vec2::new(SPACE_SM, SPACE_XS);
+                                            ui.label(
+                                                RichText::new("Profile:").small().color(pal.muted),
+                                            );
+                                            let edit_text_w = ui.fonts(|f| {
+                                                f.layout_no_wrap(
+                                                    "Edit Profile".to_owned(),
+                                                    TextStyle::Small.resolve(ui.style()),
+                                                    pal.text,
+                                                )
+                                                .size()
+                                                .x
+                                            });
+                                            let edit_btn_w =
+                                                (edit_text_w + SPACE_SM * 2.0 + 4.0).ceil();
+                                            let combo_w = (ui.available_width()
+                                                - edit_btn_w
+                                                - SPACE_SM)
+                                                .max(120.0);
+                                            egui::ComboBox::from_id_salt((
+                                                "ctrl_prof",
+                                                &ctrl.canonical_id,
+                                            ))
+                                            .width(combo_w)
+                                            .truncate()
+                                            .selected_text(
+                                                RichText::new(&ctrl.profile_name)
+                                                    .small()
+                                                    .color(pal.text),
                                             )
-                                            .size()
-                                            .x
-                                        });
-                                        let edit_btn_w = (edit_text_w + SPACE_SM * 2.0 + 4.0).ceil();
-                                        let combo_w =
-                                            (ui.available_width() - edit_btn_w - SPACE_SM).max(120.0);
-                                        egui::ComboBox::from_id_salt((
-                                            "ctrl_prof",
-                                            &ctrl.canonical_id,
-                                        ))
-                                        .width(combo_w)
-                                        .truncate()
-                                        .selected_text(
-                                            RichText::new(&ctrl.profile_name)
-                                                .small()
-                                                .color(pal.text),
-                                        )
-                                        .show_ui(ui, |ui| {
-                                            for p in &snap.config.profiles {
-                                                let item_resp = ui.selectable_label(
-                                                    ctrl.profile_id == p.id,
-                                                    &p.name,
-                                                );
-                                                if item_resp.clicked() {
-                                                    send(EngineCommand::SelectDeviceProfile {
-                                                        key: ctrl.key.clone(),
-                                                        profile_id: p.id.clone(),
-                                                    });
-                                                    state.selected_controller =
-                                                        Some(ctrl.canonical_id.clone());
-                                                    state.editing_profile_id = Some(p.id.clone());
-                                                    state.draft_profile = Some(p.clone());
-                                                    state.draft_dirty = false;
+                                            .show_ui(ui, |ui| {
+                                                for p in &snap.config.profiles {
+                                                    let item_resp = ui.selectable_label(
+                                                        ctrl.profile_id == p.id,
+                                                        &p.name,
+                                                    );
+                                                    if item_resp.clicked() {
+                                                        send(EngineCommand::SelectDeviceProfile {
+                                                            key: ctrl.key.clone(),
+                                                            profile_id: p.id.clone(),
+                                                        });
+                                                        state.selected_controller =
+                                                            Some(ctrl.canonical_id.clone());
+                                                        state.editing_profile_id =
+                                                            Some(p.id.clone());
+                                                        state.draft_profile = Some(p.clone());
+                                                        state.draft_dirty = false;
+                                                    }
                                                 }
+                                            });
+
+                                            let edit_btn = egui::Button::new(
+                                                RichText::new("Edit Profile")
+                                                    .small()
+                                                    .color(pal.text),
+                                            )
+                                            .min_size(Vec2::new(edit_btn_w, 0.0))
+                                            .fill(pal.pill_blue_fill)
+                                            .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                                            .rounding(Rounding::same(6.0));
+                                            if ui.add(edit_btn).clicked() {
+                                                state.selected_controller =
+                                                    Some(ctrl.canonical_id.clone());
+                                                state.editing_profile_id =
+                                                    Some(ctrl.profile_id.clone());
+                                                state.draft_profile = Some(
+                                                    snap.config
+                                                        .profile_by_id(&ctrl.profile_id)
+                                                        .clone(),
+                                                );
+                                                state.draft_dirty = false;
+                                                actions.push(UiAction::OpenProfileEditor {
+                                                    controller_id: ctrl.canonical_id.clone(),
+                                                    profile_id: ctrl.profile_id.clone(),
+                                                });
                                             }
                                         });
 
-                                        let edit_btn = egui::Button::new(
-                                            RichText::new("Edit Profile").small().color(pal.text),
-                                        )
-                                        .min_size(Vec2::new(edit_btn_w, 0.0))
-                                        .fill(pal.pill_blue_fill)
-                                        .stroke(Stroke::new(1.0_f32, pal.accent_line))
-                                        .rounding(Rounding::same(6.0));
-                                        if ui.add(edit_btn).clicked() {
-                                            state.selected_controller =
-                                                Some(ctrl.canonical_id.clone());
-                                            state.editing_profile_id =
-                                                Some(ctrl.profile_id.clone());
-                                            state.draft_profile = Some(
-                                                snap.config.profile_by_id(&ctrl.profile_id).clone(),
-                                            );
-                                            state.draft_dirty = false;
-                                            actions.push(UiAction::OpenProfileEditor {
-                                                controller_id: ctrl.canonical_id.clone(),
-                                                profile_id: ctrl.profile_id.clone(),
+                                        if ctrl.show_live_input {
+                                            let live_resp = ui.scope(|ui| {
+                                                draw_card_live_status(
+                                                    ui,
+                                                    ctrl.family,
+                                                    ctrl.present_buttons_mask,
+                                                    &ctrl.physical_state,
+                                                    card_inner_w,
+                                                    &pal,
+                                                );
                                             });
+                                            let lr = live_resp.response.rect;
+                                            state.last_dynamic_rect_main = Some(
+                                                state
+                                                    .last_dynamic_rect_main
+                                                    .map_or(lr, |prev| prev.union(lr)),
+                                            );
                                         }
                                     });
 
-                                    if ctrl.show_live_input {
-                                        let live_resp = ui.scope(|ui| {
-                                            draw_card_live_status(
-                                                ui,
-                                                ctrl.family,
-                                                ctrl.present_buttons_mask,
-                                                &ctrl.physical_state,
-                                                card_inner_w,
-                                                &pal,
-                                            );
-                                        });
-                                        let lr = live_resp.response.rect;
-                                        state.last_dynamic_rect_main = Some(
-                                            state
-                                                .last_dynamic_rect_main
-                                                .map_or(lr, |prev| prev.union(lr)),
-                                        );
-                                    }
-                                });
+                                if let Some(slot) = card_bg_slot {
+                                    let inner_poly = build_rounded_rect_polygon(
+                                        card_resp.response.rect.shrink(1.0),
+                                        (CARD_ROUNDING - 1.0).max(0.0),
+                                    );
+                                    ui.painter().set(
+                                        slot,
+                                        egui::Shape::convex_polygon(
+                                            inner_poly,
+                                            card_fill,
+                                            Stroke::NONE,
+                                        ),
+                                    );
+                                    paint_active_card_gradient_border(
+                                        ui.painter(),
+                                        card_resp.response.rect,
+                                        CARD_ROUNDING,
+                                    );
+                                }
 
-                            if let Some(slot) = card_bg_slot {
-                                let inner_poly = build_rounded_rect_polygon(
-                                    card_resp.response.rect.shrink(1.0),
-                                    (CARD_ROUNDING - 1.0).max(0.0),
-                                );
-                                ui.painter().set(
-                                    slot,
-                                    egui::Shape::convex_polygon(inner_poly, card_fill, Stroke::NONE),
-                                );
-                                paint_active_card_gradient_border(
-                                    ui.painter(),
-                                    card_resp.response.rect,
-                                    CARD_ROUNDING,
-                                );
-                            }
-
-                            if idx + 1 < total_cards {
-                                ui.add_space(SPACE_MD);
+                                if idx + 1 < total_cards {
+                                    ui.add_space(SPACE_MD);
+                                }
                             }
                         }
+
+                        ui.add_space(SPACE_MD);
+                        draw_drivers_section(
+                            ui,
+                            state,
+                            snap,
+                            card_inner_w,
+                            &pal,
+                            &mut actions,
+                            &mut send,
+                        );
                     });
                     content_bottom_y = Some(stack_resp.response.rect.bottom());
-            });
+                });
             if let Some(cb) = content_bottom_y {
                 state.desired_compact_logical_h = Some((cb + SPACE_MD + status_bar_h).ceil());
             }
         });
+
+    draw_install_confirmation_modal(ctx, state, snap, &pal, &mut send);
+    draw_reboot_confirmation_modal(ctx, state, &pal, &mut send);
 
     actions
 }
@@ -1166,11 +1282,27 @@ pub fn draw_profile_editor_snapshot(
                                         }
                                     }
                                     ui.separator();
-                                    if ui
-                                        .checkbox(&mut prof.cloak_physical, "Cloak")
-                                        .changed()
-                                    {
-                                        state.draft_dirty = true;
+                                    if snap.driver_status.hidhide_working() {
+                                        if ui
+                                            .checkbox(&mut prof.cloak_physical, "Cloak")
+                                            .changed()
+                                        {
+                                            state.draft_dirty = true;
+                                        }
+                                    } else {
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Checkbox::new(&mut prof.cloak_physical, "Cloak"),
+                                        );
+                                        if ui
+                                            .small_button("HidHide needed…")
+                                            .on_hover_text(
+                                                snap.driver_status.hidhide.state.status_label(),
+                                            )
+                                            .clicked()
+                                        {
+                                            state.pending_install_confirm = Some(DriverId::HidHide);
+                                        }
                                     }
                                     if ui
                                         .checkbox(&mut prof.rumble_enabled, "Rumble")
@@ -1390,6 +1522,9 @@ pub fn draw_profile_editor_snapshot(
                     });
             });
         });
+
+    draw_install_confirmation_modal(ctx, state, snap, &pal, &mut send);
+    draw_reboot_confirmation_modal(ctx, state, &pal, &mut send);
 }
 
 fn draw_remap_combobox(
@@ -1440,30 +1575,45 @@ fn draw_remap_combobox(
         });
 }
 
+fn short_driver_badge(entry: &DriverEntryStatus) -> &'static str {
+    match entry.state {
+        DriverState::Working => "OK",
+        DriverState::InstalledNotRunning(_) => "Stopped",
+        DriverState::NotInstalled => "Missing",
+    }
+}
+
 fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot, pal: &ThemePalette) {
     ui.spacing_mut().item_spacing.x = SPACE_SM;
     let ds = &snap.driver_status;
-    draw_status_dot(ui, if ds.vigem_installed { STATUS_GREEN } else { STATUS_RED });
-    ui.label(
-        RichText::new(if ds.vigem_installed {
-            "ViGEmBus: OK"
+    draw_status_dot(
+        ui,
+        if ds.vigem_working() {
+            STATUS_GREEN
         } else {
-            "ViGEmBus: Missing"
-        })
-        .small()
-        .color(pal.text),
+            STATUS_RED
+        },
+    );
+    ui.label(
+        RichText::new(format!("ViGEmBus: {}", short_driver_badge(&ds.vigem)))
+            .small()
+            .color(pal.text),
     );
     ui.separator();
 
-    let (hh_text, hh_dot) = if !ds.hidhide_installed {
-        ("HidHide: Missing", STATUS_RED)
-    } else if ds.hidhide_accessible {
-        ("HidHide: Ready", STATUS_GREEN)
-    } else {
-        ("HidHide: Locked", STATUS_RED)
-    };
-    draw_status_dot(ui, hh_dot);
-    ui.label(RichText::new(hh_text).small().color(pal.text));
+    draw_status_dot(
+        ui,
+        if ds.hidhide_working() {
+            STATUS_GREEN
+        } else {
+            STATUS_RED
+        },
+    );
+    ui.label(
+        RichText::new(format!("HidHide: {}", short_driver_badge(&ds.hidhide)))
+            .small()
+            .color(pal.text),
+    );
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let (ws, priv_b) = query_process_memory_bytes();
@@ -1477,59 +1627,402 @@ fn draw_status_bar_row(ui: &mut egui::Ui, snap: &EngineSnapshot, pal: &ThemePale
     });
 }
 
-fn draw_status_bar(
+fn draw_drivers_section(
     ui: &mut egui::Ui,
+    state: &mut AppUiState,
     snap: &EngineSnapshot,
-    has_driver_alert: bool,
+    card_inner_w: f32,
     pal: &ThemePalette,
+    actions: &mut Vec<UiAction>,
     send: &mut impl FnMut(EngineCommand),
 ) {
-    let ds = &snap.driver_status;
-    if !has_driver_alert {
-        ui.horizontal_centered(|ui| draw_status_bar_row(ui, snap, pal));
-        return;
-    }
+    ui.spacing_mut().item_spacing.y = SPACE_SM;
+    ui.label(RichText::new("Drivers").heading().color(pal.text));
 
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = SPACE_XS;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = SPACE_SM;
-            ui.spacing_mut().button_padding = Vec2::new(SPACE_SM, SPACE_XS);
-            if !ds.vigem_installed || !ds.hidhide_installed {
+    draw_single_driver_card(
+        ui,
+        state,
+        snap,
+        &snap.driver_status.vigem,
+        card_inner_w,
+        pal,
+        actions,
+        send,
+    );
+    draw_single_driver_card(
+        ui,
+        state,
+        snap,
+        &snap.driver_status.hidhide,
+        card_inner_w,
+        pal,
+        actions,
+        send,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_single_driver_card(
+    ui: &mut egui::Ui,
+    state: &mut AppUiState,
+    snap: &EngineSnapshot,
+    entry: &DriverEntryStatus,
+    card_inner_w: f32,
+    pal: &ThemePalette,
+    actions: &mut Vec<UiAction>,
+    send: &mut impl FnMut(EngineCommand),
+) {
+    let driver = entry.id;
+    let working = entry.state.is_working();
+    let busy = snap.busy_driver == Some(driver);
+
+    egui::Frame::none()
+        .fill(pal.panel)
+        .rounding(CARD_ROUNDING)
+        .stroke(Stroke::new(1.0_f32, pal.border))
+        .inner_margin(Margin::same(SPACE_MD))
+        .show(ui, |ui| {
+            ui.set_width(card_inner_w);
+            ui.spacing_mut().item_spacing = Vec2::new(SPACE_SM, SPACE_XS);
+
+            // Header: dot + driver name + requirement badge + publisher + right-aligned version
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = SPACE_XS;
+                draw_status_dot(ui, if working { STATUS_GREEN } else { STATUS_RED });
+                ui.label(RichText::new(driver.display_name()).strong().color(pal.text));
+                egui::Frame::none()
+                    .fill(if driver.is_required() {
+                        pal.pill_blue_fill
+                    } else {
+                        pal.bg
+                    })
+                    .rounding(Rounding::same(4.0))
+                    .stroke(Stroke::new(
+                        1.0_f32,
+                        if driver.is_required() {
+                            pal.accent_line
+                        } else {
+                            pal.border
+                        },
+                    ))
+                    .inner_margin(Margin::symmetric(SPACE_XS + 2.0, 1.0))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(driver.requirement_badge())
+                                .font(FontId::new(10.0, FontFamily::Proportional))
+                                .color(pal.text),
+                        );
+                    });
                 ui.label(
-                    RichText::new("Required drivers missing")
+                    RichText::new(format!("by {}", driver.publisher_short()))
                         .small()
                         .color(pal.muted),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let install_btn = egui::Button::new(
-                        RichText::new("Install Missing Drivers")
+                if let Some(ver) = &entry.version {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("v{ver}")).small().color(pal.muted));
+                    });
+                }
+            });
+
+            // Plain-language purpose line
+            ui.add(egui::Label::new(
+                RichText::new(driver.purpose_line()).small().color(pal.muted),
+            ).wrap());
+
+            // Detailed state label
+            ui.add(egui::Label::new(
+                RichText::new(format!("Status: {}", entry.state.status_label()))
+                    .small()
+                    .color(if working { pal.text } else { STATUS_RED }),
+            ).wrap());
+
+            if let Some(msg) = snap.driver_messages.get(&driver).or(entry.detail_note.as_ref()) {
+                ui.add(
+                    egui::Label::new(RichText::new(msg).small().color(pal.muted)).wrap(),
+                );
+            }
+
+            if let Some(dir) = snap.config.located_dir(driver) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = SPACE_XS;
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("Located: {dir}"))
+                                .small()
+                                .color(pal.muted),
+                        )
+                        .truncate(),
+                    );
+                    if ui.small_button("Clear").clicked() {
+                        send(EngineCommand::ClearDriverLocation(driver));
+                    }
+                });
+            }
+
+            // Action buttons (per-driver only; remedies come before any Reinstall option)
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(SPACE_SM, SPACE_XS);
+                ui.spacing_mut().button_padding = Vec2::new(SPACE_SM, SPACE_XS);
+
+                if busy {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(RichText::new("In progress…").small().color(pal.muted)),
+                    );
+                } else {
+                    match entry.state {
+                        DriverState::NotInstalled => {
+                            let inst_btn = egui::Button::new(
+                                RichText::new(format!("Install {}…", driver.display_name()))
+                                    .small()
+                                    .color(pal.text),
+                            )
+                            .fill(pal.pill_blue_fill)
+                            .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(inst_btn).clicked() {
+                                state.pending_install_confirm = Some(driver);
+                            }
+                        }
+                        DriverState::InstalledNotRunning(_) => {
+                            if let Some(rem) = remedy_for_entry(entry) {
+                                let rem_btn = egui::Button::new(
+                                    RichText::new(rem.button_label()).small().color(pal.text),
+                                )
+                                .fill(pal.pill_blue_fill)
+                                .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                                .rounding(Rounding::same(6.0));
+                                if ui.add(rem_btn).clicked() {
+                                    if rem.requires_reboot_confirm() {
+                                        state.pending_reboot_confirm = Some(driver);
+                                    } else {
+                                        send(EngineCommand::RunDriverRemedy(driver));
+                                    }
+                                }
+                            } else if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("Re-check Status").small().color(pal.text),
+                                    )
+                                    .fill(pal.pill_blue_fill)
+                                    .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                                    .rounding(Rounding::same(6.0)),
+                                )
+                                .clicked()
+                            {
+                                send(EngineCommand::RefreshStatus);
+                            }
+
+                            let reinst_btn = egui::Button::new(
+                                RichText::new("Reinstall (Later Option)…")
+                                    .small()
+                                    .color(pal.muted),
+                            )
+                            .fill(pal.widget)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(reinst_btn).clicked() {
+                                state.pending_install_confirm = Some(driver);
+                            }
+                        }
+                        DriverState::Working => {
+                            let reinst_btn = egui::Button::new(
+                                RichText::new(format!("Reinstall {}…", driver.display_name()))
+                                    .small()
+                                    .color(pal.muted),
+                            )
+                            .fill(pal.widget)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(reinst_btn).clicked() {
+                                state.pending_install_confirm = Some(driver);
+                            }
+                        }
+                    }
+
+                    let loc_btn = egui::Button::new(
+                        RichText::new("I already have this — Locate…")
                             .small()
                             .color(pal.text),
                     )
-                    .fill(pal.pill_pink_fill)
-                    .stroke(Stroke::new(1.0_f32, STATUS_RED))
+                    .fill(pal.widget)
+                    .stroke(Stroke::new(1.0_f32, pal.border))
                     .rounding(Rounding::same(6.0));
-                    if ui.add(install_btn).clicked() {
-                        send(EngineCommand::InstallDrivers);
+                    if ui.add(loc_btn).clicked() {
+                        actions.push(UiAction::BrowseDriverFolder { driver });
                     }
-                });
-            } else if ds.reboot_recommended {
-                draw_status_dot(ui, STATUS_RED);
-                ui.label(
-                    RichText::new("Reboot recommended to finish driver setup")
-                        .small()
-                        .color(pal.muted),
-                );
-            } else if let Some(err) = &ds.hidhide_error {
-                draw_status_dot(ui, STATUS_RED);
-                ui.add(
-                    egui::Label::new(RichText::new(err).small().color(pal.muted)).truncate(),
-                );
-            }
+                }
+            });
         });
-        ui.horizontal(|ui| draw_status_bar_row(ui, snap, pal));
-    });
+}
+
+fn draw_install_confirmation_modal(
+    ctx: &egui::Context,
+    state: &mut AppUiState,
+    snap: &EngineSnapshot,
+    pal: &ThemePalette,
+    send: &mut impl FnMut(EngineCommand),
+) {
+    let Some(driver) = state.pending_install_confirm else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    egui::Area::new(egui::Id::new("driver_install_confirm_backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+            let tint = if snap.config.theme_mode == ThemeMode::Dark {
+                Color32::from_rgba_unmultiplied(4, 4, 8, 170)
+            } else {
+                Color32::from_rgba_unmultiplied(18, 28, 42, 120)
+            };
+            ui.painter().rect_filled(rect, Rounding::ZERO, tint);
+        });
+
+    let modal_w = (screen.width() - SPACE_LG * 2.0).min(352.0).max(260.0);
+    egui::Area::new(egui::Id::new("driver_install_confirm_dialog"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(pal.panel)
+                .rounding(CARD_ROUNDING)
+                .stroke(Stroke::new(1.5_f32, pal.accent_line))
+                .inner_margin(Margin::same(SPACE_MD))
+                .show(ui, |ui| {
+                    ui.set_width(modal_w);
+                    ui.spacing_mut().item_spacing.y = SPACE_SM;
+
+                    let verb = if snap.driver_status.entry(driver).state.is_not_installed() {
+                        "Install"
+                    } else {
+                        "Reinstall"
+                    };
+                    ui.label(
+                        RichText::new(format!("{verb} {}?", driver.display_name()))
+                            .heading()
+                            .color(pal.text),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "Publisher: {} | Bundled v{}",
+                            driver.publisher_full(),
+                            driver.bundled_version_hint()
+                        ))
+                        .small()
+                        .color(pal.accent_line),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(driver.install_impact())
+                                .small()
+                                .color(pal.text),
+                        )
+                        .wrap(),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "The official signed installer wizard will now open with no silent flags so you can step through it yourself. Windows may show a UAC prompt.",
+                            )
+                            .small()
+                            .color(pal.muted),
+                        )
+                        .wrap(),
+                    );
+
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            ui.spacing_mut().button_padding = Vec2::new(SPACE_MD, SPACE_XS);
+                            let confirm_btn = egui::Button::new(
+                                RichText::new("Continue to Installer").small().color(pal.text),
+                            )
+                            .fill(pal.pill_blue_fill)
+                            .stroke(Stroke::new(1.0_f32, pal.accent_line))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(confirm_btn).clicked() {
+                                state.pending_install_confirm = None;
+                                send(EngineCommand::ConfirmInstallDriver(driver));
+                            }
+
+                            let cancel_btn = egui::Button::new(
+                                RichText::new("Cancel").small().color(pal.muted),
+                            )
+                            .fill(pal.widget)
+                            .stroke(Stroke::new(1.0_f32, pal.border))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(cancel_btn).clicked() {
+                                state.pending_install_confirm = None;
+                                send(EngineCommand::CancelInstallDriver(driver));
+                            }
+                        });
+                    });
+                });
+        });
+}
+
+fn draw_reboot_confirmation_modal(
+    ctx: &egui::Context,
+    state: &mut AppUiState,
+    pal: &ThemePalette,
+    send: &mut impl FnMut(EngineCommand),
+) {
+    let Some(driver) = state.pending_reboot_confirm else {
+        return;
+    };
+    let screen = ctx.screen_rect();
+    let modal_w = (screen.width() - SPACE_LG * 2.0).min(340.0).max(260.0);
+    egui::Area::new(egui::Id::new("driver_reboot_confirm_dialog"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(pal.panel)
+                .rounding(CARD_ROUNDING)
+                .stroke(Stroke::new(1.5_f32, STATUS_RED))
+                .inner_margin(Margin::same(SPACE_MD))
+                .show(ui, |ui| {
+                    ui.set_width(modal_w);
+                    ui.spacing_mut().item_spacing.y = SPACE_SM;
+                    ui.label(
+                        RichText::new("Restart Windows Now?")
+                            .heading()
+                            .color(pal.text),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!(
+                                "{} has a pending reboot before Windows will load the driver. Save any open work before restarting.",
+                                driver.display_name()
+                            ))
+                            .small()
+                            .color(pal.muted),
+                        )
+                        .wrap(),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            let restart_btn = egui::Button::new(
+                                RichText::new("Restart Windows").small().color(pal.text),
+                            )
+                            .fill(pal.pill_pink_fill)
+                            .stroke(Stroke::new(1.0_f32, STATUS_RED))
+                            .rounding(Rounding::same(6.0));
+                            if ui.add(restart_btn).clicked() {
+                                state.pending_reboot_confirm = None;
+                                send(EngineCommand::ConfirmSystemReboot(driver));
+                            }
+                            if ui.button("Cancel").clicked() {
+                                state.pending_reboot_confirm = None;
+                            }
+                        });
+                    });
+                });
+        });
 }
 
 fn extra_buttons_for_device(family: ControllerFamily, active_mask: u32) -> Vec<LogicalButton> {
@@ -1851,13 +2344,9 @@ mod tests {
                 },
             ],
             config: AppConfig::default(),
-            driver_status: DriverStatus {
-                vigem_installed: true,
-                hidhide_installed: true,
-                hidhide_accessible: true,
-                hidhide_error: None,
-                reboot_recommended: false,
-            },
+            driver_status: DriverStatus::all_working_for_tests(),
+            driver_messages: BTreeMap::new(),
+            busy_driver: None,
             last_status_message: None,
         }
     }
@@ -2149,12 +2638,252 @@ mod tests {
             .desired_compact_logical_h
             .expect("desired_compact_logical_h populated on expanded render");
         assert!(
-            collapsed_h < 270.0 && (expanded_h - collapsed_h) > 100.0,
-            "collapsed height ({collapsed_h}) should hug header-only card and shrink >100px vs expanded ({expanded_h})"
+            (expanded_h - collapsed_h) > 100.0,
+            "collapsed height ({collapsed_h}) should shrink >100px vs expanded ({expanded_h})"
         );
         let edit_pt = find_text_center(&out_col.shapes, "Edit Profile").unwrap();
-        // Bottom margin of collapsed card sits cleanly below Edit Profile button (uniform 12pt scale)
-        assert!(collapsed_h - (edit_pt.y + 12.0) < 76.0);
+        let drivers_pt = find_text_center(&out_col.shapes, "Drivers").unwrap();
+        // Drivers heading starts directly after one spacing step beneath collapsed card bottom.
+        assert!(
+            drivers_pt.y - edit_pt.y < 64.0,
+            "collapsed card should hug Edit Profile without dead space before Drivers ({} -> {})",
+            edit_pt.y,
+            drivers_pt.y
+        );
+    }
+
+    #[test]
+    fn driver_cards_render_separately_with_no_combined_install_button() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        snap.driver_status.vigem = DriverEntryStatus::not_installed(DriverId::ViGEmBus);
+        snap.driver_status.hidhide = DriverEntryStatus::not_installed(DriverId::HidHide);
+        let mut ui_state = AppUiState::default();
+
+        let out = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 900.0))),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |_| {});
+            },
+        );
+
+        assert!(find_text_center(&out.shapes, "Install ViGEmBus…").is_some());
+        assert!(find_text_center(&out.shapes, "Install HidHide…").is_some());
+        assert!(find_text_center(&out.shapes, "Install Missing Drivers").is_none());
+        assert!(find_text_center(&out.shapes, "REQUIRED to create virtual Xbox 360 / DualShock 4 pads.").is_some());
+        assert!(find_text_center(&out.shapes, "OPTIONAL, only needed to hide (cloak) the physical pad from games.").is_some());
+    }
+
+    #[test]
+    fn install_confirmation_dialog_names_driver_publisher_uac_and_cancel_logs_without_installing() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        snap.driver_status.vigem = DriverEntryStatus::not_installed(DriverId::ViGEmBus);
+        let mut ui_state = AppUiState::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 900.0)));
+        let mut emitted = Vec::new();
+        let mut t = 0.05_f64;
+
+        let out_idle = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(t),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| emitted.push(cmd));
+            },
+        );
+        let inst_btn = find_text_center(&out_idle.shapes, "Install ViGEmBus…").unwrap();
+        for pressed in [true, false] {
+            t += 0.05;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(t),
+                    events: vec![
+                        egui::Event::PointerMoved(inst_btn),
+                        egui::Event::PointerButton {
+                            pos: inst_btn,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd)
+                    });
+                },
+            );
+        }
+        // Clicking Install opens confirmation modal ONLY — never emits ConfirmInstallDriver yet.
+        assert_eq!(ui_state.pending_install_confirm, Some(DriverId::ViGEmBus));
+        assert!(emitted.is_empty());
+
+        t += 0.05;
+        let out_modal = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(t),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| emitted.push(cmd));
+            },
+        );
+        assert!(find_text_center(&out_modal.shapes, "Install ViGEmBus?").is_some());
+        let cancel_pt = find_text_center(&out_modal.shapes, "Cancel").unwrap();
+        for pressed in [true, false] {
+            t += 0.05;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(t),
+                    events: vec![
+                        egui::Event::PointerMoved(cancel_pt),
+                        egui::Event::PointerButton {
+                            pos: cancel_pt,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd)
+                    });
+                },
+            );
+        }
+        assert_eq!(ui_state.pending_install_confirm, None);
+        assert!(emitted.contains(&EngineCommand::CancelInstallDriver(DriverId::ViGEmBus)));
+        assert!(!emitted.contains(&EngineCommand::ConfirmInstallDriver(DriverId::ViGEmBus)));
+    }
+
+    #[test]
+    fn missing_vigem_toggle_explains_and_offers_install_without_auto_installing() {
+        let ctx = egui::Context::default();
+        configure_neon_theme_and_fonts(&ctx);
+        let mut snap = sample_snapshot();
+        snap.controllers.truncate(1);
+        snap.controllers[0].enabled = false;
+        snap.controllers[0].virtual_active = false;
+        snap.driver_status.vigem = DriverEntryStatus::not_installed(DriverId::ViGEmBus);
+
+        let mut ui_state = AppUiState::default();
+        let screen = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 900.0)));
+        let mut emitted = Vec::new();
+        let mut t = 0.05_f64;
+
+        let out_idle = ctx.run(
+            egui::RawInput {
+                screen_rect: screen,
+                time: Some(t),
+                ..Default::default()
+            },
+            |c| {
+                let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| emitted.push(cmd));
+            },
+        );
+        let active_pt = find_text_center(&out_idle.shapes, "Active").unwrap();
+        for pressed in [true, false] {
+            t += 0.05;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: screen,
+                    time: Some(t),
+                    events: vec![
+                        egui::Event::PointerMoved(active_pt),
+                        egui::Event::PointerButton {
+                            pos: active_pt,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    focused: true,
+                    ..Default::default()
+                },
+                |c| {
+                    let _ = draw_compact_main_snapshot(c, &mut ui_state, &snap, |cmd| {
+                        emitted.push(cmd)
+                    });
+                },
+            );
+        }
+        assert!(emitted.is_empty());
+        assert_eq!(
+            ui_state.missing_vigem_notice_controller.as_deref(),
+            Some("057e:2009:NSP-1")
+        );
+    }
+
+    #[test]
+    fn remedy_buttons_match_stopped_disabled_device_error_and_reboot_pending() {
+        use z_core::driver::NotRunningReason;
+        let stopped = DriverEntryStatus {
+            id: DriverId::ViGEmBus,
+            state: DriverState::InstalledNotRunning(NotRunningReason::ServiceStopped),
+            version: None,
+            pnp_instance_id: None,
+            detail_note: None,
+        };
+        assert_eq!(
+            remedy_for_entry(&stopped),
+            Some(z_platform_windows::drivers::RemedyKind::StartService)
+        );
+
+        let disabled = DriverEntryStatus {
+            id: DriverId::HidHide,
+            state: DriverState::InstalledNotRunning(NotRunningReason::ServiceDisabled),
+            version: None,
+            pnp_instance_id: None,
+            detail_note: None,
+        };
+        assert_eq!(
+            remedy_for_entry(&disabled),
+            Some(z_platform_windows::drivers::RemedyKind::EnableAndStartService)
+        );
+
+        let dev_err = DriverEntryStatus {
+            id: DriverId::ViGEmBus,
+            state: DriverState::InstalledNotRunning(NotRunningReason::DeviceError {
+                problem_code: 22,
+            }),
+            version: None,
+            pnp_instance_id: Some("ROOT\\SYSTEM\\0003".to_string()),
+            detail_note: None,
+        };
+        assert_eq!(
+            remedy_for_entry(&dev_err),
+            Some(z_platform_windows::drivers::RemedyKind::ReenableDevice {
+                instance_id: "ROOT\\SYSTEM\\0003".to_string()
+            })
+        );
+
+        let reboot = DriverEntryStatus {
+            id: DriverId::HidHide,
+            state: DriverState::InstalledNotRunning(NotRunningReason::RebootPending),
+            version: None,
+            pnp_instance_id: None,
+            detail_note: None,
+        };
+        assert_eq!(
+            remedy_for_entry(&reboot),
+            Some(z_platform_windows::drivers::RemedyKind::RestartMachine)
+        );
     }
 
     #[test]
