@@ -18,7 +18,7 @@ use z_core::model::{
     ControllerFamily, DisconnectPolicy, HardwareKey, LogicalButton, PhysicalGamepadState,
     Transport, VirtualOutputReport, VirtualTargetKind,
 };
-use z_core::profile::{AppConfig, Profile, ThemeMode};
+use z_core::profile::{AppConfig, Profile, ThemeAccent, ThemeMode};
 use z_platform_windows::backend_impl::WindowsOutputBackend;
 use z_platform_windows::drivers::{self, AppLog, RemedyKind};
 use z_platform_windows::hidhide;
@@ -155,6 +155,7 @@ pub enum EngineCommand {
         show_live_input: bool,
     },
     SetThemeMode(ThemeMode),
+    SetThemeAccent(ThemeAccent),
     UpsertProfile(Profile),
     DeleteProfile(String),
     CancelInstallDriver(DriverId),
@@ -942,6 +943,10 @@ fn handle_ui_command(
         }
         EngineCommand::SetThemeMode(mode) => {
             config.theme_mode = mode;
+            let _ = config.save_atomic(config_path);
+        }
+        EngineCommand::SetThemeAccent(accent) => {
+            config.theme_accent = accent;
             let _ = config.save_atomic(config_path);
         }
         EngineCommand::UpsertProfile(profile) => {

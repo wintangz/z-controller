@@ -124,6 +124,132 @@ impl ThemeMode {
     }
 }
 
+/// Curated WT monochrome theme presets (WT_UI_LIBRARY.md §0.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreset {
+    #[default]
+    Blue,
+    Pink,
+    Purple,
+    Green,
+    Orange,
+    Yellow,
+    Red,
+}
+
+impl ThemePreset {
+    pub const ALL: [Self; 7] = [
+        Self::Blue,
+        Self::Pink,
+        Self::Purple,
+        Self::Green,
+        Self::Orange,
+        Self::Yellow,
+        Self::Red,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Blue => "Blue",
+            Self::Pink => "Pink",
+            Self::Purple => "Purple",
+            Self::Green => "Green",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Red => "Red",
+        }
+    }
+
+    /// Canonical source RGB from WT_UI_LIBRARY.md §0.6.
+    pub const fn base_rgb(self) -> [u8; 3] {
+        match self {
+            Self::Blue => [0x7C, 0xCB, 0xF2],   // #7CCBF2
+            Self::Pink => [0xF2, 0xA9, 0xD6],   // #F2A9D6
+            Self::Purple => [0x9B, 0x8A, 0xFB], // #9B8AFB
+            Self::Green => [0x3E, 0xCF, 0x6E],  // #3ECF6E
+            Self::Orange => [0xFB, 0x92, 0x3C], // #FB923C
+            Self::Yellow => [0xFA, 0xCC, 0x15], // #FACC15
+            Self::Red => [0xF8, 0x71, 0x71],    // #F87171
+        }
+    }
+
+    pub fn hex_string(self) -> String {
+        let [r, g, b] = self.base_rgb();
+        format!("#{r:02X}{g:02X}{b:02X}")
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "blue" => Some(Self::Blue),
+            "pink" => Some(Self::Pink),
+            "purple" => Some(Self::Purple),
+            "green" => Some(Self::Green),
+            "orange" => Some(Self::Orange),
+            "yellow" => Some(Self::Yellow),
+            "red" => Some(Self::Red),
+            _ => None,
+        }
+    }
+}
+
+/// App-level accent choice (preset or custom RGB normalised by the theme engine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ThemeAccent {
+    Preset { preset: ThemePreset },
+    Custom { r: u8, g: u8, b: u8 },
+}
+
+impl Default for ThemeAccent {
+    fn default() -> Self {
+        Self::Preset {
+            preset: ThemePreset::Blue,
+        }
+    }
+}
+
+impl ThemeAccent {
+    pub const fn base_rgb(self) -> [u8; 3] {
+        match self {
+            Self::Preset { preset } => preset.base_rgb(),
+            Self::Custom { r, g, b } => [r, g, b],
+        }
+    }
+
+    pub fn hex_string(self) -> String {
+        let [r, g, b] = self.base_rgb();
+        format!("#{r:02X}{g:02X}{b:02X}")
+    }
+
+    pub fn display_name(self) -> String {
+        match self {
+            Self::Preset { preset } => preset.label().to_string(),
+            Self::Custom { r, g, b } => format!("Custom #{r:02X}{g:02X}{b:02X}"),
+        }
+    }
+
+    /// Parses `#RRGGBB` or `RRGGBB` hex string.
+    pub fn parse_hex(raw: &str) -> Option<[u8; 3]> {
+        let hex = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+        if hex.len() != 6 || !hex.is_ascii() {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some([r, g, b])
+    }
+
+    /// Parses either a preset name (`pink`, `purple`, ...) or a hex colour (`#2563EB`).
+    pub fn parse_arg(raw: &str) -> Option<Self> {
+        if let Some(preset) = ThemePreset::from_name(raw) {
+            return Some(Self::Preset { preset });
+        }
+        Self::parse_hex(raw).map(|[r, g, b]| Self::Custom { r, g, b })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControllerBinding {
     pub profile_id: String,
@@ -139,6 +265,8 @@ pub struct AppConfig {
     pub default_profile_id: String,
     #[serde(default)]
     pub theme_mode: ThemeMode,
+    #[serde(default)]
+    pub theme_accent: ThemeAccent,
     #[serde(default)]
     pub vigem_located_dir: Option<String>,
     #[serde(default)]
@@ -158,6 +286,7 @@ impl Default for AppConfig {
         Self {
             default_profile_id: default_profile_id(),
             theme_mode: ThemeMode::Dark,
+            theme_accent: ThemeAccent::default(),
             vigem_located_dir: None,
             hidhide_located_dir: None,
             profiles: vec![
@@ -390,11 +519,64 @@ mod tests {
         let reloaded = AppConfig::load_or_default(&file);
         assert_eq!(reloaded.theme_mode, ThemeMode::Light);
 
-        // Legacy config missing theme_mode loads as Dark.
+        // Legacy config missing theme_mode/theme_accent loads as Dark + Blue.
         let legacy_toml = "default_profile_id = \"xbox-360\"\n";
         std::fs::write(&file, legacy_toml).unwrap();
         let legacy = AppConfig::load_or_default(&file);
         assert_eq!(legacy.theme_mode, ThemeMode::Dark);
+        assert_eq!(
+            legacy.theme_accent,
+            ThemeAccent::Preset {
+                preset: ThemePreset::Blue
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_accent_presets_and_custom_rgb_persist_across_restarts() {
+        let mut cfg = AppConfig::default();
+        assert_eq!(
+            cfg.theme_accent,
+            ThemeAccent::Preset {
+                preset: ThemePreset::Blue
+            }
+        );
+        assert_eq!(cfg.theme_accent.base_rgb(), [0x7C, 0xCB, 0xF2]);
+
+        let dir = std::env::temp_dir().join(format!("z_ctrl_accent_test_{}", std::process::id()));
+        let file = dir.join("config.toml");
+
+        cfg.theme_accent = ThemeAccent::Preset {
+            preset: ThemePreset::Purple,
+        };
+        cfg.save_atomic(&file).unwrap();
+        let loaded_preset = AppConfig::load_or_default(&file);
+        assert_eq!(
+            loaded_preset.theme_accent,
+            ThemeAccent::Preset {
+                preset: ThemePreset::Purple
+            }
+        );
+
+        cfg.theme_accent = ThemeAccent::Custom {
+            r: 0x25,
+            g: 0x63,
+            b: 0xEB,
+        };
+        cfg.save_atomic(&file).unwrap();
+        let loaded_custom = AppConfig::load_or_default(&file);
+        assert_eq!(
+            loaded_custom.theme_accent,
+            ThemeAccent::Custom {
+                r: 0x25,
+                g: 0x63,
+                b: 0xEB
+            }
+        );
+        assert_eq!(ThemeAccent::parse_hex("#ff8800"), Some([0xFF, 0x88, 0x00]));
+        assert_eq!(ThemeAccent::parse_hex("xyz123"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

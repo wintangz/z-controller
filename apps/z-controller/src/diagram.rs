@@ -4,9 +4,8 @@ use z_core::model::{ControllerFamily, LogicalButton};
 use z_core::profile::Profile;
 
 use crate::engine::PhysicalSnapshot;
-use crate::ui::{
-    LOGO_BLUE, LOGO_LAVENDER, LOGO_PINK, ThemePalette, normalize_stick_axis, normalize_trigger_axis,
-};
+use crate::theme_engine::ThemePalette;
+use crate::ui::{normalize_stick_axis, normalize_trigger_axis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaceGlyph {
@@ -604,10 +603,13 @@ fn paint_controller_silhouette(
     }
     p.add(Shape::mesh(mesh));
 
-    // Soft outer pastel-blue hairline rim + crisp shell stroke
+    // Soft outer monochrome accent hairline rim + crisp shell stroke
     p.add(Shape::Path(PathShape::closed_line(
         outline.clone(),
-        Stroke::new(2.8_f32, Color32::from_rgba_unmultiplied(LOGO_BLUE.r(), LOGO_BLUE.g(), LOGO_BLUE.b(), 26)),
+        Stroke::new(
+            2.8_f32,
+            Color32::from_rgba_unmultiplied(pal.accent_line.r(), pal.accent_line.g(), pal.accent_line.b(), 26),
+        ),
     )));
     p.add(Shape::Path(PathShape::closed_line(
         outline,
@@ -644,12 +646,20 @@ fn paint_trigger_bar(
     pal: &ThemePalette,
 ) {
     let pressed = value > 0.05;
-    let border = if pressed { LOGO_PINK } else { pal.diagram_ctrl_stroke };
+    let border = if pressed { pal.accent_line } else { pal.diagram_ctrl_stroke };
     if pressed {
         p.rect_stroke(
             rect.expand(1.5),
             Rounding::same(8.5),
-            Stroke::new(2.0_f32, Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 64)),
+            Stroke::new(
+                2.0_f32,
+                Color32::from_rgba_unmultiplied(
+                    pal.accent_line.r(),
+                    pal.accent_line.g(),
+                    pal.accent_line.b(),
+                    64,
+                ),
+            ),
         );
     }
     p.rect_filled(rect, Rounding::same(7.0), pal.diagram_ctrl_fill);
@@ -669,7 +679,7 @@ fn paint_trigger_bar(
         p.rect_filled(
             Rect::from_min_size(bar.min, Vec2::new(fw, bar.height())),
             Rounding::same(1.5),
-            LOGO_PINK,
+            pal.accent_line,
         );
     }
     p.text(
@@ -693,18 +703,18 @@ fn button_visuals(
     let remapped = profile.button_remap.contains_key(&btn);
 
     let fill = if pressed {
-        pal.pill_pink_fill
+        pal.solid_fill
     } else if selected {
-        pal.pill_blue_fill
+        pal.soft_fill
     } else {
         pal.diagram_ctrl_fill
     };
     let stroke = if pressed {
-        Stroke::new(1.8_f32, LOGO_PINK)
+        Stroke::new(1.8_f32, pal.accent_line)
     } else if selected {
         Stroke::new(1.8_f32, pal.accent_line)
     } else if remapped {
-        Stroke::new(1.2_f32, LOGO_LAVENDER)
+        Stroke::new(1.2_f32, pal.accent_source)
     } else {
         Stroke::new(1.1_f32, pal.diagram_ctrl_stroke)
     };
@@ -792,7 +802,7 @@ fn paint_center_icon(
                 Pos2::new(rect.left() + 8.0, rect.top() + 3.5),
                 Pos2::new(rect.right() - 8.0, rect.top() + 5.5),
             );
-            p.rect_filled(light, Rounding::same(1.0), LOGO_BLUE);
+            p.rect_filled(light, Rounding::same(1.0), pal.accent_line);
             p.text(
                 Pos2::new(center.x, center.y + 3.0),
                 Align2::CENTER_CENTER,
@@ -833,7 +843,7 @@ fn paint_center_icon(
             );
             p.line_segment(
                 [Pos2::new(center.x - 5.5, center.y + 3.0), Pos2::new(center.x + 5.5, center.y - 3.0)],
-                Stroke::new(1.1_f32, LOGO_PINK),
+                Stroke::new(1.1_f32, pal.accent_line),
             );
         }
         CenterVisual::MinusBar => {
@@ -889,12 +899,23 @@ fn draw_bar_button(
         button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_rect(p, rect, rounding, if pressed { LOGO_PINK } else { LOGO_BLUE });
+        paint_selection_glow_rect(
+            p,
+            rect,
+            rounding,
+            if pressed { pal.solid_fill } else { pal.accent_line },
+        );
     }
     p.rect_filled(rect, Rounding::same(rounding), fill);
     p.rect_stroke(rect, Rounding::same(rounding), stroke);
 
-    let fg = if pressed || selected { pal.text } else { pal.muted };
+    let fg = if pressed {
+        pal.on_solid
+    } else if selected {
+        pal.text
+    } else {
+        pal.muted
+    };
     if let Some(txt) = label {
         p.text(
             rect.center(),
@@ -908,7 +929,7 @@ fn draw_bar_button(
         paint_center_icon(p, rect.center(), rect, vis, fg, pal);
     }
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(rect.right() - 4.0, rect.top() + 4.0), 2.0, LOGO_LAVENDER);
+        p.circle_filled(Pos2::new(rect.right() - 4.0, rect.top() + 4.0), 2.0, pal.accent_line);
     }
 }
 
@@ -933,14 +954,25 @@ fn draw_center_circle(
         button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
+        paint_selection_glow_circle(
+            p,
+            center,
+            radius,
+            if pressed { pal.solid_fill } else { pal.accent_line },
+        );
     }
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
-    let fg = if pressed || selected { pal.text } else { pal.muted };
+    let fg = if pressed {
+        pal.on_solid
+    } else if selected {
+        pal.text
+    } else {
+        pal.muted
+    };
     paint_center_icon(p, center, rect, icon, fg, pal);
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.0, LOGO_LAVENDER);
+        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.0, pal.accent_line);
     }
 }
 
@@ -965,12 +997,23 @@ fn draw_face_circle(
         button_visuals(btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
+        paint_selection_glow_circle(
+            p,
+            center,
+            radius,
+            if pressed { pal.solid_fill } else { pal.accent_line },
+        );
     }
     p.circle_filled(center, radius, fill);
     p.circle_stroke(center, radius, stroke);
 
-    let fg = if pressed || selected { pal.text } else { pal.muted };
+    let fg = if pressed {
+        pal.on_solid
+    } else if selected {
+        pal.text
+    } else {
+        pal.muted
+    };
     match glyph {
         FaceGlyph::Text(t) => {
             p.text(
@@ -990,7 +1033,7 @@ fn draw_face_circle(
             ];
             p.add(Shape::Path(PathShape::closed_line(
                 pts,
-                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
+                Stroke::new(1.5_f32, fg),
             )));
         }
         FaceGlyph::Square => {
@@ -998,26 +1041,26 @@ fn draw_face_circle(
             p.rect_stroke(
                 sq,
                 Rounding::same(1.0),
-                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
+                Stroke::new(1.5_f32, fg),
             );
         }
         FaceGlyph::Circle => {
             p.circle_stroke(
                 center,
                 radius * 0.46,
-                Stroke::new(1.5_f32, if pressed { LOGO_PINK } else { fg }),
+                Stroke::new(1.5_f32, fg),
             );
         }
         FaceGlyph::Cross => {
             let r = radius * 0.42;
-            let st = Stroke::new(1.6_f32, if pressed { LOGO_PINK } else { fg });
+            let st = Stroke::new(1.6_f32, fg);
             p.line_segment([Pos2::new(center.x - r, center.y - r), Pos2::new(center.x + r, center.y + r)], st);
             p.line_segment([Pos2::new(center.x + r, center.y - r), Pos2::new(center.x - r, center.y + r)], st);
         }
     }
 
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.2, LOGO_LAVENDER);
+        p.circle_filled(Pos2::new(center.x + radius * 0.65, center.y - radius * 0.65), 2.2, pal.accent_line);
     }
 }
 
@@ -1115,13 +1158,24 @@ fn draw_plus_dpad(
             button_visuals(btn, profile, phys, *selected_button, pal);
         let p = ui.painter();
         if pressed || selected {
-            paint_selection_glow_rect(p, rect, 3.0, if pressed { LOGO_PINK } else { LOGO_BLUE });
+            paint_selection_glow_rect(
+                p,
+                rect,
+                3.0,
+                if pressed { pal.solid_fill } else { pal.accent_line },
+            );
             p.rect_filled(rect, Rounding::same(2.5), fill);
             p.rect_stroke(rect, Rounding::same(2.5), stroke);
         } else if remapped {
             p.rect_stroke(rect, Rounding::same(2.5), stroke);
         }
-        let tri_col = if pressed || selected { pal.text } else { pal.muted };
+        let tri_col = if pressed {
+            pal.on_solid
+        } else if selected {
+            pal.text
+        } else {
+            pal.muted
+        };
         p.add(Shape::convex_polygon(chevron.to_vec(), tri_col, Stroke::NONE));
     }
 
@@ -1153,7 +1207,12 @@ fn draw_stick_assembly(
         button_visuals(click_btn, profile, phys, *selected_button, pal);
     let p = ui.painter();
     if pressed || selected {
-        paint_selection_glow_circle(p, center, radius, if pressed { LOGO_PINK } else { LOGO_BLUE });
+        paint_selection_glow_circle(
+            p,
+            center,
+            radius,
+            if pressed { pal.solid_fill } else { pal.accent_line },
+        );
     }
     // Outer gate well + inner ringed thumbstick cap
     p.circle_filled(center, radius, pal.bg);
@@ -1169,18 +1228,22 @@ fn draw_stick_assembly(
     let travel = radius - 6.0_f32;
     let clamped = if mag > 1.0 { 1.0 / mag } else { 1.0 };
     let dot = Pos2::new(center.x + x * clamped * travel, center.y + y * clamped * travel);
-    if mag > 0.08 {
+    if mag > 0.08 || pressed {
         p.circle_filled(
             dot,
             7.5,
-            Color32::from_rgba_unmultiplied(LOGO_PINK.r(), LOGO_PINK.g(), LOGO_PINK.b(), 68),
+            Color32::from_rgba_unmultiplied(pal.accent_line.r(), pal.accent_line.g(), pal.accent_line.b(), 68),
         );
-        p.circle_filled(dot, 4.2, LOGO_PINK);
+        p.circle_filled(dot, 4.2, pal.accent_line);
     } else {
-        p.circle_filled(dot, 3.6, if pressed { LOGO_PINK } else { LOGO_BLUE });
+        p.circle_filled(dot, 3.6, pal.accent_line);
     }
     if remapped && !pressed && !selected {
-        p.circle_filled(Pos2::new(center.x + radius - 3.0, center.y - radius + 3.0), 2.2, LOGO_LAVENDER);
+        p.circle_filled(
+            Pos2::new(center.x + radius - 3.0, center.y - radius + 3.0),
+            2.2,
+            pal.accent_line,
+        );
     }
 }
 

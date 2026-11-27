@@ -5,6 +5,7 @@ mod engine;
 mod logo_mark;
 mod logo_png;
 mod sw_painter;
+mod theme_engine;
 mod tray_win32;
 mod ui;
 
@@ -18,7 +19,7 @@ use z_core::backend::DriverStatus;
 use z_core::battery::{BatteryReading, BatteryStatus};
 use z_core::driver::{DriverEntryStatus, DriverId, DriverState, NotRunningReason};
 use z_core::model::{ControllerFamily, HardwareKey, LogicalButton, Transport, VirtualTargetKind};
-use z_core::profile::{AppConfig, Profile, ThemeMode};
+use z_core::profile::{AppConfig, Profile, ThemeAccent, ThemeMode};
 use z_platform_windows::drivers::{
     AppLog, dry_run_installer_spec, query_process_memory_bytes,
 };
@@ -63,6 +64,8 @@ fn main() {
     let mut preview_one_collapsed = false;
     let mut preview_missing_drivers = false;
     let mut preview_theme_mode: Option<ThemeMode> = None;
+    let mut preview_theme_accent: Option<ThemeAccent> = None;
+    let mut preview_open_theme_picker = false;
     let mut preview_confirm_driver: Option<DriverId> = None;
     let mut preview_expand_drivers = false;
     let mut preview_hover_refresh = false;
@@ -113,6 +116,17 @@ fn main() {
                     };
                     i += 1;
                 }
+            }
+            "--preview-accent" => {
+                if i + 1 < args.len() {
+                    preview_theme_accent = ThemeAccent::parse_arg(&args[i + 1]);
+                    open_immediately = true;
+                    i += 1;
+                }
+            }
+            "--preview-open-theme-picker" => {
+                preview_open_theme_picker = true;
+                open_immediately = true;
             }
             "--preview-confirm-driver" => {
                 if i + 1 < args.len() {
@@ -339,6 +353,8 @@ fn main() {
         preview,
         preview_driver_status,
         preview_theme_mode,
+        preview_theme_accent,
+        preview_open_theme_picker,
         preview_confirm_driver,
         preview_expand_drivers,
         preview_hover_refresh,

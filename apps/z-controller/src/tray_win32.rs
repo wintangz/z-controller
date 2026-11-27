@@ -38,7 +38,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use z_core::backend::DriverStatus;
 use z_core::driver::DriverId;
-use z_core::profile::ThemeMode;
+use z_core::profile::{ThemeAccent, ThemeMode};
 
 use crate::engine::{ControllerSnapshot, EngineCommand, EngineHandle, EngineSnapshot, WM_APP_STATE_CHANGED};
 use crate::sw_painter::SoftwarePainter;
@@ -58,8 +58,8 @@ const WM_NCHITTEST: u32 = 0x0084;
 const WM_SIZING: u32 = 0x0214;
 const CMD_OPEN: usize = 1001;
 const CMD_QUIT: usize = 1002;
-const CLEAR_BG_DARK_RGB: u32 = 0x000A_0A10;
-const CLEAR_BG_LIGHT_RGB: u32 = 0x00EE_F4FA;
+const CLEAR_BG_DARK_RGB: u32 = 0x000C_0C0C;
+const CLEAR_BG_LIGHT_RGB: u32 = 0x00F4_F4F4;
 
 // Logical client dimensions at 96 DPI (exact same UI geometry at 100%, scaled cleanly per monitor DPI).
 const COMPACT_CLIENT_LOGICAL_W: i32 = 412;
@@ -275,6 +275,7 @@ struct AppShared {
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     preview_driver_status: Option<DriverStatus>,
     preview_theme_mode: Option<ThemeMode>,
+    preview_theme_accent: Option<ThemeAccent>,
     start_time: Instant,
     hinstance: HINSTANCE,
     large_icon: HICON,
@@ -334,6 +335,8 @@ pub fn run_tray_app(
     preview_controllers: Option<Vec<ControllerSnapshot>>,
     preview_driver_status: Option<DriverStatus>,
     preview_theme_mode: Option<ThemeMode>,
+    preview_theme_accent: Option<ThemeAccent>,
+    preview_open_theme_picker: bool,
     preview_confirm_driver: Option<DriverId>,
     preview_expand_drivers: bool,
     preview_hover_refresh: bool,
@@ -366,6 +369,7 @@ pub fn run_tray_app(
 
     let mut init_ui_state = AppUiState::default();
     init_ui_state.pending_install_confirm = preview_confirm_driver;
+    init_ui_state.theme_picker_open = preview_open_theme_picker;
     if preview_expand_drivers {
         init_ui_state.drivers_section_override = Some(true);
         init_ui_state.last_all_drivers_working = Some(true);
@@ -377,6 +381,7 @@ pub fn run_tray_app(
         preview_controllers,
         preview_driver_status,
         preview_theme_mode,
+        preview_theme_accent,
         start_time: Instant::now(),
         hinstance,
         large_icon,
@@ -804,10 +809,10 @@ fn apply_titlebar_theme(hwnd: HWND, mode: ThemeMode) {
                 size_of::<i32>() as u32,
             );
         }
-        // DWMWA_CAPTION_COLOR uses COLORREF (0x00BBGGRR).
+        // DWMWA_CAPTION_COLOR uses COLORREF (0x00BBGGRR), aligned to pure neutral surfaces.
         let caption_color: u32 = match mode {
-            ThemeMode::Dark => 0x0010_0A0A,  // #0A0A10
-            ThemeMode::Light => 0x00FA_F4EE, // #EEF4FA
+            ThemeMode::Dark => 0x000C_0C0C,  // #0C0C0C
+            ThemeMode::Light => 0x00F4_F4F4, // #F4F4F4
         };
         unsafe {
             set_attr(
@@ -1117,6 +1122,7 @@ unsafe extern "system" fn wnd_proc(
                 let effective_snap = if shared.preview_controllers.is_some()
                     || shared.preview_driver_status.is_some()
                     || shared.preview_theme_mode.is_some()
+                    || shared.preview_theme_accent.is_some()
                 {
                     let mut cloned: EngineSnapshot = (*base_snap).clone();
                     if let Some(preview) = shared.preview_controllers.as_ref() {
@@ -1139,6 +1145,9 @@ unsafe extern "system" fn wnd_proc(
                     }
                     if let Some(tm) = shared.preview_theme_mode {
                         cloned.config.theme_mode = tm;
+                    }
+                    if let Some(ta) = shared.preview_theme_accent {
+                        cloned.config.theme_accent = ta;
                     }
                     Some(cloned)
                 } else {
